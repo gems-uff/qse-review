@@ -1,4 +1,22 @@
-"""Step 2 – Classify SE subjects in each paper using an LLM (OpenAI).
+"""Step 2 – Classify SE subjects in each paper using an LLM.
+
+Two operating modes are supported via ``--mode``:
+
+``api`` (default)
+    Calls the OpenAI API directly for each paper (original behaviour).
+    Requires the ``OPENAI_API_KEY`` environment variable.
+
+``agent``
+    Designed to run inside an agentic CLI environment (Claude Code,
+    Copilot CLI, etc.).  Instead of calling an API the script prints each
+    prompt file from ``data/prompts/`` to **stdout** one at a time, then
+    waits for the agent to write the corresponding classification JSON to
+    ``data/classifications/<stem>.json`` before moving on to the next paper.
+
+    The agent is responsible for reading the prompt, deciding the
+    classification, and writing the JSON file in the exact format described
+    in the prompt.  Run ``generate_prompts.py`` first to create the prompt
+    files.
 
 For each JSON file produced by ``extract_text.py`` the script sends the
 ``text_for_classification`` field (abstract or first ~1 500 words) to an
@@ -20,10 +38,11 @@ The classification JSON written per paper:
       - ``primary_subject``  – most prominent area
       - ``summary``          – one-sentence SE contribution summary
       - ``confidence``       – "high" | "medium" | "low"
-      - ``tokens_used``      – total tokens consumed for this call
+      - ``tokens_used``      – total tokens consumed for this call (api mode only)
 
 Prerequisites:
-  Set the ``OPENAI_API_KEY`` environment variable before running.
+  ``api`` mode: set the ``OPENAI_API_KEY`` environment variable before running.
+  ``agent`` mode: run ``generate_prompts.py`` first.
 """
 
 import argparse
@@ -34,7 +53,10 @@ import sys
 import time
 from pathlib import Path
 
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except ImportError:  # pragma: no cover – optional in agent mode
+    OpenAI = None  # type: ignore[assignment,misc]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,6 +69,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 EXTRACTED_DIR = Path("data/extracted")
 CLASSIFICATIONS_DIR = Path("data/classifications")
+PROMPTS_DIR = Path("data/prompts")
 DEFAULT_MODEL = "gpt-4o-mini"
 
 # SWEBOK 4th Edition Knowledge Areas used as the classification taxonomy
@@ -124,43 +147,8 @@ def classify_paper(client: OpenAI, model: str, text: str, filename: str) -> dict
 # CLI
 # ---------------------------------------------------------------------------
 
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Classify SE subjects in extracted paper texts using an LLM. "
-            "Set OPENAI_API_KEY in the environment before running."
-        )
-    )
-    parser.add_argument(
-        "--extracted-dir",
-        type=Path,
-        default=EXTRACTED_DIR,
-        help="Directory with extracted paper JSON files (default: data/extracted/)",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=CLASSIFICATIONS_DIR,
-        help="Directory to save classification JSON files (default: data/classifications/)",
-    )
-    parser.add_argument(
-        "--model",
-        default=DEFAULT_MODEL,
-        help=f"OpenAI model to use (default: {DEFAULT_MODEL})",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Re-classify papers that already have a classification file.",
-    )
-    parser.add_argument(
-        "--delay",
-        type=float,
-        default=0.5,
-        help="Seconds to wait between API calls to respect rate limits (default: 0.5).",
-    )
-    args = parser.parse_args(argv)
-
+def _run_api_mode(args: argparse.Namespace) -> None:
+    """Classify papers by calling the OpenAI API directly."""
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         logger.error("OPENAI_API_KEY environment variable is not set.")
@@ -179,6 +167,13 @@ def main(argv: list[str] | None = None) -> None:
 
     logger.info("Found %d extracted file(s) to classify.", len(extracted_files))
 
+    if OpenAI is None:
+        logger.error(
+            "The 'openai' package is not installed. "
+            "Run: pip install openai"
+        )
+        sys.exit(1)
+
     client = OpenAI(api_key=api_key)
 
     success = errors = skipped = 0
@@ -196,9 +191,7 @@ def main(argv: list[str] | None = None) -> None:
             extracted_data = json.load(fh)
 
         if extracted_data.get("error"):
-            logger.warning(
-                "  skip (extraction error): %s", extracted_path.name
-            )
+            logger.warning("  skip (extraction error): %s", extracted_path.name)
             errors += 1
             continue
 
@@ -244,6 +237,143 @@ def main(argv: list[str] | None = None) -> None:
         skipped,
         total_tokens,
     )
+
+
+def _run_agent_mode(args: argparse.Namespace) -> None:
+    """Print each prompt to stdout so an agentic CLI can classify it.
+
+    The agent is expected to:
+      1. Read the prompt printed to stdout.
+      2. Decide the classification.
+      3. Write the JSON result to ``data/classifications/<stem>.json``
+         in the exact format described inside the prompt.
+
+    The script then polls for the output file before moving to the next paper,
+    so the agent and this script stay in sync when the agent processes papers
+    sequentially (which is the normal case for agentic CLIs).
+    """
+    if not args.prompts_dir.exists():
+        logger.error(
+            "Prompts directory not found: %s\n"
+            "Run 'python scripts/generate_prompts.py' first.",
+            args.prompts_dir,
+        )
+        sys.exit(1)
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    prompt_files = sorted(args.prompts_dir.glob("*.md"))
+    if not prompt_files:
+        logger.warning(
+            "No prompt files found in %s. "
+            "Run 'python scripts/generate_prompts.py' first.",
+            args.prompts_dir,
+        )
+        sys.exit(0)
+
+    logger.info(
+        "Agent mode — %d prompt file(s) to process.", len(prompt_files)
+    )
+
+    success = skipped = 0
+
+    for prompt_path in prompt_files:
+        stem = prompt_path.stem
+        output_path = args.output_dir / f"{stem}.json"
+
+        if output_path.exists() and not args.overwrite:
+            logger.info("  skip (already classified): %s", stem)
+            skipped += 1
+            continue
+
+        # Print the prompt so the agent can read it and act on it.
+        prompt_text = prompt_path.read_text(encoding="utf-8")
+        print("\n" + "=" * 72)
+        print(f"CLASSIFY: {stem}  ({success + skipped + 1}/{len(prompt_files)})")
+        print("=" * 72)
+        print(prompt_text)
+        print("=" * 72)
+        print(
+            f"\n[classify.py] Waiting for the agent to write: {output_path}\n"
+            "[classify.py] Please create that file now, then press Enter to continue."
+        )
+        sys.stdout.flush()
+
+        # Wait for the agent to create the output file.
+        input()
+
+        if output_path.exists():
+            logger.info("  classified: %s", stem)
+            success += 1
+        else:
+            logger.warning(
+                "  output file not found after confirmation: %s", output_path
+            )
+
+    logger.info(
+        "Agent classification complete — success: %d  skipped: %d",
+        success,
+        skipped,
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Classify SE subjects in extracted paper texts using an LLM.\n\n"
+            "Modes:\n"
+            "  api   – call OpenAI API directly (requires OPENAI_API_KEY)\n"
+            "  agent – print prompts to stdout for an agentic CLI to classify\n"
+            "          (requires 'generate_prompts.py' to have been run first)"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["api", "agent"],
+        default="api",
+        help="Classification mode: 'api' (default) or 'agent'.",
+    )
+    parser.add_argument(
+        "--extracted-dir",
+        type=Path,
+        default=EXTRACTED_DIR,
+        help="Directory with extracted paper JSON files (default: data/extracted/)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=CLASSIFICATIONS_DIR,
+        help="Directory to save classification JSON files (default: data/classifications/)",
+    )
+    parser.add_argument(
+        "--prompts-dir",
+        type=Path,
+        default=PROMPTS_DIR,
+        help="Directory with prompt Markdown files, used in agent mode (default: data/prompts/)",
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"OpenAI model to use in api mode (default: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Re-classify papers that already have a classification file.",
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.5,
+        help="Seconds to wait between API calls in api mode (default: 0.5).",
+    )
+    args = parser.parse_args(argv)
+
+    if args.mode == "agent":
+        _run_agent_mode(args)
+    else:
+        _run_api_mode(args)
 
 
 if __name__ == "__main__":
