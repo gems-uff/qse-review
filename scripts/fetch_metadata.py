@@ -257,7 +257,7 @@ def main() -> None:
         out_path = EXTRACTED_DIR / f"{stem}.json"
 
         if out_path.exists() and not args.overwrite:
-            logger.debug("skip (exists): %s", out_path.name)
+            logger.info("[%d/%d] skip (already fetched): %s", i, len(papers), out_path.name)
             skipped += 1
             continue
 
