@@ -1,6 +1,7 @@
 """Tests for the qse-review pipeline."""
 
 import json
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -11,9 +12,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from enrich_from_pdfs import _doi_from_filename, _match_record, _merge_record, main as enrich_main  # noqa: E402
+from fetch_metadata import main as fetch_metadata_main  # noqa: E402
 from classify import _validate_classification, SE_SUBJECTS, SE_SUBJECTS_SET  # noqa: E402
 from extract_text import (  # noqa: E402
     MIN_ABSTRACT_LENGTH,
+    _clean_extracted_text,
     _extract_abstract,
     _extract_bibliographic,
     _extract_doi,
@@ -58,6 +61,20 @@ NO_ABSTRACT_TEXT = (
     "2. Related Work\nSeveral works exist.\n"
 )
 
+NOISY_PDF_TEXT = (
+    "Version of Record: https://www.sciencedirect.com/science/article/pii/S0164121223002005\n"
+    "Manuscript_93e37fab054653f60d2a7b792c7be0ad\n"
+    "Bugs4Q: A Benchmark of Existing Bugs to Enable Controlled Testing\n"
+    "and Debugging Studies for Quantum Programs\n"
+    "PengzhanZhao, ZhongtaoMiao and JianjunZhao\n"
+    "ARTICLE INFO\n"
+    "ABSTRACT\n"
+    "Realistic benchmarks of reproducible bugs and fixes are vital to good experimental "
+    "evaluation of debugging and testing approaches for quantum programs.\n"
+    "Keywords: Quantumsoftwaretesting\n"
+    "1 INTRODUCTION\n"
+)
+
 
 def test_extract_abstract_ieee():
     result = _extract_abstract(IEEE_TEXT)
@@ -80,6 +97,21 @@ def test_extract_abstract_springer():
 
 def test_extract_abstract_missing():
     assert _extract_abstract(NO_ABSTRACT_TEXT) is None
+
+
+def test_clean_extracted_text_removes_editorial_noise():
+    cleaned = _clean_extracted_text(NOISY_PDF_TEXT)
+    assert "Version of Record" not in cleaned
+    assert "Manuscript_" not in cleaned
+    assert "ARTICLE INFO" not in cleaned
+    assert "Pengzhan Zhao, Zhongtao Miao and Jianjun Zhao" in cleaned
+
+
+def test_extract_abstract_after_cleaning_noisy_pdf_text():
+    cleaned = _clean_extracted_text(NOISY_PDF_TEXT)
+    result = _extract_abstract(cleaned)
+    assert result is not None
+    assert "Realistic benchmarks of reproducible bugs and fixes" in result
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +354,79 @@ def test_match_record_prefers_doi(tmp_path):
     assert candidates == []
 
 
+def test_match_record_falls_back_to_noisy_title(tmp_path):
+    extracted_path = tmp_path / "10_1016_j_infsof_2023_107249.json"
+    extracted_path.write_text(
+        json.dumps(
+            {
+                "filename": "10_1016_j_infsof_2023_107249.pdf",
+                "stem": "10_1016_j_infsof_2023_107249",
+                "abstract": None,
+                "text_for_classification": "Making existing software quantum safe: A case study on IBM Db2",
+                "bibliographic": {
+                    "doi": "10.1016/j.infsof.2023.107249",
+                    "title": "Making existing software quantum safe: A case study on IBM Db2",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _, index = __import__("enrich_from_pdfs")._build_index(tmp_path)
+    record, match_by, candidates = _match_record(
+        Path("2110.08661v2.pdf"),
+        {
+            "bibliographic": {
+                "title": (
+                    "Making existing software quantum safe: a case study on IBM Db2 "
+                    "Lei Zhang1, Andriy Miranskyy1, Walid Rjaibi2"
+                )
+            }
+        },
+        index,
+    )
+    assert record is not None
+    assert record["_path"].name == "10_1016_j_infsof_2023_107249.json"
+    assert match_by == "title-fuzzy"
+    assert candidates == []
+
+
+def test_match_record_falls_back_to_title_with_prefix_noise(tmp_path):
+    extracted_path = tmp_path / "10_1016_j_jss_2023_111805.json"
+    extracted_path.write_text(
+        json.dumps(
+            {
+                "filename": "10_1016_j_jss_2023_111805.pdf",
+                "stem": "10_1016_j_jss_2023_111805",
+                "abstract": None,
+                "text_for_classification": "Bugs4Q: A benchmark of existing bugs to enable controlled testing and debugging studies for quantum programs",
+                "bibliographic": {
+                    "doi": "10.1016/j.jss.2023.111805",
+                    "title": "Bugs4Q: A benchmark of existing bugs to enable controlled testing and debugging studies for quantum programs",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _, index = __import__("enrich_from_pdfs")._build_index(tmp_path)
+    record, match_by, candidates = _match_record(
+        Path("1-s2.0-S0164121223002005-am.pdf"),
+        {
+            "bibliographic": {
+                "title": (
+                    "Manuscript_93e37fab054653f60d2a7b792c7be0ad Bugs4Q: "
+                    "A Benchmark of Existing Bugs to Enable Controlled Testing "
+                    "and Debugging Studies for Quantum Programs"
+                )
+            }
+        },
+        index,
+    )
+    assert record is not None
+    assert record["_path"].name == "10_1016_j_jss_2023_111805.json"
+    assert match_by == "title"
+    assert candidates == []
+
+
 def test_doi_from_filename_supports_acm_and_springer():
     assert _doi_from_filename(Path("3764582.pdf")) == "10.1145/3764582"
     assert _doi_from_filename(Path("3412451.3428497.pdf")) == "10.1145/3412451.3428497"
@@ -475,7 +580,7 @@ def test_enrich_main_updates_extracted_and_doi_catalog(tmp_path, monkeypatch):
     assert json.loads(unresolved_path.read_text(encoding="utf-8")) == []
 
 
-def test_enrich_main_skips_unchanged_pdf_on_second_run(tmp_path, monkeypatch):
+def test_enrich_main_skips_unchanged_pdf_on_second_run(tmp_path, monkeypatch, caplog):
     papers_dir = tmp_path / "papers"
     extracted_dir = tmp_path / "extracted"
     papers_dir.mkdir()
@@ -551,11 +656,70 @@ def test_enrich_main_skips_unchanged_pdf_on_second_run(tmp_path, monkeypatch):
         str(state_path),
     ]
     enrich_main(args)
-    enrich_main(args)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        enrich_main(args)
 
     assert calls["count"] == 1
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["skipped"] == [{"pdf": "3764582.pdf", "reason": "already enriched"}]
+    messages = [record.getMessage() for record in caplog.records]
+    assert "PDF enrichment queue — to process: 0  skipped: 1" in messages
+    assert not any("skip (already enriched)" in message for message in messages)
+
+
+def test_fetch_metadata_summarizes_skips_without_per_item_logs(tmp_path, monkeypatch, caplog):
+    dois_path = tmp_path / "dois.json"
+    extracted_dir = tmp_path / "extracted"
+    extracted_dir.mkdir()
+
+    papers = [
+        {
+            "sheet": "Q-SE",
+            "year": 2025,
+            "authors": "A. Researcher",
+            "title": "Already Fetched Paper",
+            "doi": "10.1000/already-fetched",
+            "url": None,
+            "doi_source": "spreadsheet",
+        },
+        {
+            "sheet": "Q-SE",
+            "year": 2025,
+            "authors": "B. Researcher",
+            "title": "Pending Paper",
+            "doi": "10.1000/pending-paper",
+            "url": None,
+            "doi_source": "spreadsheet",
+        },
+    ]
+    dois_path.write_text(json.dumps(papers), encoding="utf-8")
+    (extracted_dir / "10_1000_already-fetched.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr("fetch_metadata.DOIS_PATH", dois_path)
+    monkeypatch.setattr("fetch_metadata.EXTRACTED_DIR", extracted_dir)
+    monkeypatch.setattr(
+        "fetch_metadata._s2_by_doi",
+        lambda doi, mailto=None: {
+            "title": "Pending Paper",
+            "year": 2025,
+            "authors": [{"name": "B. Researcher"}],
+            "abstract": "A sufficiently detailed abstract for the pending paper.",
+            "venue": "Q-SE",
+        },
+    )
+    monkeypatch.setattr("fetch_metadata._s2_by_title", lambda title, mailto=None: None)
+    monkeypatch.setattr("fetch_metadata._crossref_by_doi", lambda doi, mailto=None: None)
+    monkeypatch.setattr("fetch_metadata.time.sleep", lambda seconds: None)
+
+    with patch.object(sys, "argv", ["fetch_metadata.py"]):
+        with caplog.at_level(logging.INFO):
+            fetch_metadata_main()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "Metadata fetch queue — to process: 1  skipped: 1" in messages
+    assert "Metadata fetch complete — processed: 1  success: 1  no_abstract: 0  skipped: 1  errors: 0" in messages
+    assert not any("skip (already fetched)" in message for message in messages)
 
 
 def test_enrich_main_is_local_only_by_default(tmp_path, monkeypatch):

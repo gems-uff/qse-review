@@ -243,29 +243,36 @@ def main() -> None:
 
     skipped = success = no_abstract = errors = 0
     processed = 0  # counts papers actually fetched (not skipped)
+    pending_papers: list[tuple[dict, Path]] = []
 
-    for i, paper in enumerate(papers, 1):
+    for paper in papers:
         doi = paper.get("doi")
         title = paper.get("title", "")
 
-        # Determine output path (need stem first)
         if doi:
             stem = re.sub(r"[^\w\-]", "_", doi)
         else:
             stem = re.sub(r"\W+", "_", title)[:80]
 
         out_path = EXTRACTED_DIR / f"{stem}.json"
-
         if out_path.exists() and not args.overwrite:
-            logger.info("[%d/%d] skip (already fetched): %s", i, len(papers), out_path.name)
             skipped += 1
             continue
+        pending_papers.append((paper, out_path))
 
-        if args.limit is not None and processed >= args.limit:
-            logger.info("Reached --limit %d, stopping early.", args.limit)
-            break
+    if args.limit is not None and len(pending_papers) > args.limit:
+        pending_papers = pending_papers[: args.limit]
 
-        logger.info("[%d/%d] %s", i, len(papers), title[:80])
+    logger.info(
+        "Metadata fetch queue — to process: %d  skipped: %d",
+        len(pending_papers),
+        skipped,
+    )
+
+    for i, (paper, out_path) in enumerate(pending_papers, 1):
+        doi = paper.get("doi")
+        title = paper.get("title", "")
+        logger.info("[%d/%d] %s", i, len(pending_papers), title[:80])
 
         # --- Semantic Scholar ---
         s2 = None
@@ -301,8 +308,12 @@ def main() -> None:
         processed += 1
 
     logger.info(
-        "Done. success=%d  no_abstract=%d  skipped=%d  errors=%d",
-        success, no_abstract, skipped, errors,
+        "Metadata fetch complete — processed: %d  success: %d  no_abstract: %d  skipped: %d  errors: %d",
+        processed,
+        success,
+        no_abstract,
+        skipped,
+        errors,
     )
 
 

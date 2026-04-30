@@ -11,6 +11,11 @@ knowledge areas.
 You drive the entire pipeline.  No shell script is needed — just follow the
 steps below in order.
 
+When the user says **"Rode o pipeline"** (or an equivalent request), run the
+**full pipeline in order, one program at a time**. Show the output of each step
+before moving to the next one, so the user can inspect the result and decide
+whether to continue.
+
 ---
 
 ## Pipeline

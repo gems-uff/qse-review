@@ -10,6 +10,7 @@ import re
 import sys
 from copy import deepcopy
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from extract_text import MIN_ABSTRACT_LENGTH, extract_text_from_pdf
@@ -30,12 +31,36 @@ STATE_PATH = Path("out/pdf_enrichment_state.json")
 _NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
 _ACM_FILENAME_RE = re.compile(r"^\d+(?:\.\d+)?$")
 _SPRINGER_FILENAME_RE = re.compile(r"^s\d{5}-\d{3}-\d{5}-\d$", re.IGNORECASE)
+_TITLE_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_TITLE_NOISE_RE = [
+    re.compile(r"\bmanuscript_[a-f0-9]+\b", re.IGNORECASE),
+    re.compile(r"\b\d+v\d+\.\d+:vixra\b", re.IGNORECASE),
+    re.compile(r"\b(?:arxiv|vixra)[:\s]*\d{4}\.\d{4,5}(?:v\d+)?\b", re.IGNORECASE),
+    re.compile(r"\bcontents?\s*lists?\s*available.*$", re.IGNORECASE),
+    re.compile(r"^information and software technology\b.*$", re.IGNORECASE),
+    re.compile(r"^©\s*\d{4}.*$", re.IGNORECASE),
+]
 
 
 def _normalize(value: str | None) -> str:
     if not value:
         return ""
     return _NORMALIZE_RE.sub("", value.lower())
+
+
+def _clean_title_for_matching(value: str | None) -> str:
+    if not value:
+        return ""
+
+    text = value.replace("\n", " ")
+    text = re.sub(r"\(cid:\d+\)", " ", text)
+    for pattern in _TITLE_NOISE_RE:
+        text = pattern.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip(" -:;,")
+
+
+def _title_tokens(value: str | None) -> set[str]:
+    return set(_TITLE_TOKEN_RE.findall(_clean_title_for_matching(value).lower()))
 
 
 def _load_json(path: Path, default):
@@ -79,6 +104,7 @@ def _record_keys(record: dict) -> set[str]:
 
     for raw_value in (
         bibliographic.get("title"),
+        _clean_title_for_matching(bibliographic.get("title")),
         record.get("stem"),
         record.get("filename"),
     ):
@@ -96,11 +122,13 @@ def _build_index(extracted_dir: Path) -> tuple[list[dict], dict]:
     records: list[dict] = []
     doi_index: dict[str, list[dict]] = {}
     key_index: dict[str, list[dict]] = {}
+    title_records: list[dict] = []
 
     for path in sorted(extracted_dir.glob("*.json")):
         record = json.loads(path.read_text(encoding="utf-8"))
         record["_path"] = path
         records.append(record)
+        title_records.append(record)
 
         doi = ((record.get("bibliographic") or {}).get("doi") or "").lower()
         if doi:
@@ -109,7 +137,7 @@ def _build_index(extracted_dir: Path) -> tuple[list[dict], dict]:
         for key in _record_keys(record):
             key_index.setdefault(key, []).append(record)
 
-    return records, {"doi": doi_index, "key": key_index}
+    return records, {"doi": doi_index, "key": key_index, "title": title_records}
 
 
 def _current_target_for_pdf(pdf_path: Path, index: dict) -> dict | None:
@@ -176,16 +204,19 @@ def _match_record(pdf_path: Path, pdf_result: dict, index: dict) -> tuple[dict |
         if len(doi_matches) > 1:
             return None, "ambiguous-doi", [m["_path"].name for m in doi_matches]
 
-    candidate_keys = {
-        _normalize(pdf_path.stem),
-        _normalize((pdf_result.get("bibliographic") or {}).get("title")),
-    }
-    candidate_keys = {key for key in candidate_keys if key}
+    candidate_keys: dict[str, str] = {}
+    for raw_key, match_by in (
+        (_normalize(pdf_path.stem), "stem"),
+        (_normalize(_clean_title_for_matching(pdf_path.stem)), "stem"),
+        (_normalize((pdf_result.get("bibliographic") or {}).get("title")), "title"),
+        (_normalize(_clean_title_for_matching((pdf_result.get("bibliographic") or {}).get("title"))), "title"),
+    ):
+        if raw_key:
+            candidate_keys[raw_key] = match_by
 
     candidates: dict[Path, tuple[dict, str]] = {}
-    for key in sorted(candidate_keys):
+    for key, match_by in sorted(candidate_keys.items()):
         for record in index["key"].get(key, []):
-            match_by = "title" if key == _normalize((pdf_result.get("bibliographic") or {}).get("title")) else "stem"
             candidates[record["_path"]] = (record, match_by)
 
     if len(candidates) == 1:
@@ -193,7 +224,69 @@ def _match_record(pdf_path: Path, pdf_result: dict, index: dict) -> tuple[dict |
         return record, match_by, []
     if len(candidates) > 1:
         return None, "ambiguous-key", [path.name for path in sorted(candidates)]
+
+    pdf_title = (pdf_result.get("bibliographic") or {}).get("title")
+    fuzzy_matches = _strong_title_matches(pdf_title, index["title"])
+    if len(fuzzy_matches) == 1:
+        return fuzzy_matches[0]["record"], "title-fuzzy", []
+    if len(fuzzy_matches) > 1:
+        return None, "ambiguous-title-fuzzy", [match["record"]["_path"].name for match in fuzzy_matches]
     return None, "unmatched", []
+
+
+def _title_match_metrics(pdf_title: str | None, record_title: str | None) -> tuple[float, float, float, bool]:
+    pdf_normalized = _normalize(_clean_title_for_matching(pdf_title))
+    record_normalized = _normalize(_clean_title_for_matching(record_title))
+    if not pdf_normalized or not record_normalized:
+        return 0.0, 0.0, 0.0, False
+
+    pdf_tokens = _title_tokens(pdf_title)
+    record_tokens = _title_tokens(record_title)
+    overlap = len(pdf_tokens & record_tokens)
+    record_coverage = overlap / max(1, len(record_tokens))
+    pdf_coverage = overlap / max(1, len(pdf_tokens))
+    ratio = SequenceMatcher(None, pdf_normalized, record_normalized).ratio()
+    contain = pdf_normalized in record_normalized or record_normalized in pdf_normalized
+    return ratio, record_coverage, pdf_coverage, contain
+
+
+def _is_strong_title_match(pdf_title: str | None, record_title: str | None) -> tuple[bool, tuple[float, float, float, bool]]:
+    metrics = _title_match_metrics(pdf_title, record_title)
+    ratio, record_coverage, pdf_coverage, contain = metrics
+    is_match = (
+        contain and (record_coverage >= 0.85 or pdf_coverage >= 0.85) and ratio >= 0.4
+    ) or (
+        record_coverage >= 0.85 and ratio >= 0.65
+    ) or (
+        ratio >= 0.82 and record_coverage >= 0.6
+    )
+    return is_match, metrics
+
+
+def _strong_title_matches(pdf_title: str | None, records: list[dict]) -> list[dict]:
+    matches: list[dict] = []
+    for record in records:
+        record_title = (record.get("bibliographic") or {}).get("title")
+        is_match, metrics = _is_strong_title_match(pdf_title, record_title)
+        if is_match:
+            matches.append({"record": record, "metrics": metrics})
+
+    if len(matches) <= 1:
+        return matches
+
+    matches.sort(
+        key=lambda item: (
+            item["metrics"][0],
+            item["metrics"][1],
+            item["metrics"][2],
+        ),
+        reverse=True,
+    )
+    best = matches[0]
+    second = matches[1]
+    if best["metrics"][0] - second["metrics"][0] >= 0.08 or second["metrics"][1] < 0.7:
+        return [best]
+    return matches
 
 
 def _looks_like_title_only(text: str | None) -> bool:
@@ -380,10 +473,8 @@ def main(argv: list[str] | None = None) -> None:
 
     records, index = _build_index(args.extracted_dir)
     del records  # only the index is needed directly
-
+    pending_pdfs = []
     for pdf_path in pdf_files:
-        if args.limit is not None and processed >= args.limit:
-            break
         skip, reason = _should_skip_pdf(
             pdf_path,
             state=state,
@@ -393,11 +484,22 @@ def main(argv: list[str] | None = None) -> None:
         )
         if skip:
             skipped += 1
-            logger.info("  skip (%s): %s", reason, pdf_path.name)
             report["skipped"].append({"pdf": pdf_path.name, "reason": reason})
             continue
+        pending_pdfs.append(pdf_path)
+
+    if args.limit is not None and len(pending_pdfs) > args.limit:
+        pending_pdfs = pending_pdfs[: args.limit]
+
+    logger.info(
+        "PDF enrichment queue — to process: %d  skipped: %d",
+        len(pending_pdfs),
+        skipped,
+    )
+
+    for pdf_path in pending_pdfs:
         processed += 1
-        logger.info("[%d/%d] %s", processed, len(pdf_files), pdf_path.name)
+        logger.info("[%d/%d] %s", processed, len(pending_pdfs), pdf_path.name)
 
         pdf_result = extract_text_from_pdf(
             pdf_path,
@@ -445,7 +547,6 @@ def main(argv: list[str] | None = None) -> None:
             and record.get("abstract")
             and len(record.get("abstract") or "") >= MIN_ABSTRACT_LENGTH
         ):
-            logger.info("  skip (already enriched): %s", pdf_path.name)
             state[pdf_path.name] = {
                 "status": "matched",
                 "target": record["_path"].name,
@@ -519,7 +620,8 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     logger.info(
-        "PDF enrichment complete — enriched: %d  skipped: %d  ambiguous: %d  unmatched: %d  doi_updates: %d",
+        "PDF enrichment complete — processed: %d  enriched: %d  skipped: %d  ambiguous: %d  unmatched: %d  doi_updates: %d",
+        processed,
         enriched,
         skipped,
         ambiguous,

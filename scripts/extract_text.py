@@ -45,6 +45,15 @@ _EMPTY_BIBLIOGRAPHIC: dict = {
     "venue_type": None,
     "source": "heuristic",
 }
+_NOISY_LINE_RE = [
+    re.compile(r"^version of record:", re.IGNORECASE),
+    re.compile(r"^contents lists available at", re.IGNORECASE),
+    re.compile(r"^available online at", re.IGNORECASE),
+    re.compile(r"^sciencedirect$", re.IGNORECASE),
+    re.compile(r"^article info$", re.IGNORECASE),
+    re.compile(r"^please cite this article", re.IGNORECASE),
+    re.compile(r"^this is a pdf file of an unedited manuscript", re.IGNORECASE),
+]
 
 
 def _extract_abstract(text: str) -> str | None:
@@ -63,6 +72,41 @@ def _extract_abstract(text: str) -> str | None:
         if len(abstract) > MIN_ABSTRACT_LENGTH:
             return abstract
     return None
+
+
+def _clean_extracted_text(text: str) -> str:
+    """Normalize PDF text before metadata and abstract extraction."""
+    if not text:
+        return ""
+
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = re.sub(r"(\w)-\n(\w)", r"\1\2", cleaned)
+    cleaned = re.sub(r"\(cid:\d+\)", " ", cleaned)
+    cleaned = re.sub(r"\bManuscript_[a-f0-9]+\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bARTICLE INFO\b", "\n", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bABSTRACT\b", "\nAbstract\n", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(KEYWORDS?|Index Terms)\b\s*:?", r"\n\1: ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(?m)^\d+\s+(?=[A-Z][A-Za-z])", "", cleaned)
+
+    normalized_lines: list[str] = []
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if normalized_lines and normalized_lines[-1]:
+                normalized_lines.append("")
+            continue
+
+        line = re.sub(r"(?<=[,;:])(?=\S)", " ", line)
+        line = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", line)
+        line = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", line)
+        line = re.sub(r"\s+", " ", line).strip()
+        if any(pattern.search(line) for pattern in _NOISY_LINE_RE):
+            continue
+        normalized_lines.append(line)
+
+    cleaned = "\n".join(normalized_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 _DOI_RE = re.compile(
@@ -291,8 +335,9 @@ def extract_text_from_pdf(
         return result
 
     result["pages_extracted"] = len(pages_text)
-    result["full_text"] = "\n".join(pages_text)
-    first_page = pages_text[0] if pages_text else ""
+    cleaned_pages = [_clean_extracted_text(page_text) for page_text in pages_text]
+    result["full_text"] = "\n\n".join(page for page in cleaned_pages if page)
+    first_page = cleaned_pages[0] if cleaned_pages else ""
 
     if use_ocr and len(result["full_text"].strip()) < MIN_TEXT_FOR_OCR:
         logger.warning(
@@ -302,8 +347,8 @@ def extract_text_from_pdf(
         )
         ocr_text = _ocr_fallback(pdf_path, max_pages)
         if ocr_text.strip():
-            result["full_text"] = ocr_text
-            first_page = ocr_text.split("\n\n")[0]
+            result["full_text"] = _clean_extracted_text(ocr_text)
+            first_page = result["full_text"].split("\n\n")[0]
             result["ocr_used"] = True
     elif len(result["full_text"].strip()) < MIN_TEXT_FOR_OCR:
         logger.warning(
