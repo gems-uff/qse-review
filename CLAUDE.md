@@ -44,7 +44,9 @@ python scripts/fetch_metadata.py [--mailto your@email.com]
 
 Reads `out/dois.json`, queries the **Semantic Scholar** API (with CrossRef as
 fallback) for each paper and writes one JSON file per paper to `out/extracted/`.
-Pass `--overwrite` to re-fetch already-processed papers.
+Pass `--overwrite` to re-fetch already-processed papers, `--delay N` to adjust
+the seconds between API calls (default `1.0`), or `--limit N` to stop after
+processing `N` papers.
 
 ### Step 2 – Classify each paper (your task)
 
@@ -64,15 +66,19 @@ classification:
 python scripts/classify.py
 ```
 
-That command lists every unclassified paper and a short excerpt so you know
-what work remains.
+That is the default `--mode agent` behaviour: it lists every unclassified
+paper and a short excerpt so you know what work remains.
 
 To classify all papers via the OpenAI API instead of doing it yourself:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-python scripts/classify.py --mode api
+python scripts/classify.py --mode api [--model gpt-4o-mini] [--limit N] [--overwrite]
 ```
+
+`--model` selects the OpenAI model (default `gpt-4o-mini`), `--limit N` stops
+after `N` papers, and `--overwrite` re-classifies entries that already have a
+file in `out/classifications/`.
 
 ### Step 3 – Generate visualisations
 
@@ -87,6 +93,10 @@ Reads `out/classifications/*.json` and writes to `out/analysis/`:
 - `paper_subjects.csv` – per-paper table
 - `subject_frequencies.json` – aggregate counts
 - `cooccurrence.json` – raw co-occurrence matrix
+
+Useful flags: `--hide-empty` (drop subjects with zero papers from the
+histogram), `--min-confidence {low,medium,high}` (ignore classifications below
+this confidence), and `--title TEXT` (custom histogram title).
 
 ---
 
