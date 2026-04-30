@@ -5,6 +5,11 @@ according to the SE knowledge areas defined in [SWEBOK 4th Edition](https://www.
 The pipeline produces a frequency histogram showing which SE topics are most
 covered in the QSE literature.
 
+The pipeline is designed to be driven by an **AI agent** (Claude Code, GitHub
+Copilot, etc.) that reads `CLAUDE.md` for instructions and performs the
+classification step itself — no API key required.  An OpenAI API fallback is
+also available for fully automated runs.
+
 ---
 
 ## Pipeline overview
@@ -12,23 +17,23 @@ covered in the QSE literature.
 ```
 papers/*.pdf
     │
-    ▼ Step 1 – extract_text.py  (deterministic, no LLM)
+    ▼ Step 1 – extract_text.py      (deterministic, no LLM)
 data/extracted/*.json
     │
-    ▼ Step 2 – classify.py      (LLM, uses OpenAI API)
+    ▼ Step 2 – agent reads & classifies   ← YOU (or --mode api)
 data/classifications/*.json
     │
-    ▼ Step 3 – visualize.py     (deterministic, no LLM)
+    ▼ Step 3 – visualize.py         (deterministic, no LLM)
 data/output/
   ├── histogram.png
   ├── paper_subjects.csv
   └── subject_frequencies.json
 ```
 
-Steps 1 and 3 are fully deterministic and require no API calls.  
-Step 2 sends only a short excerpt per paper (abstract or first ~1 500 words)
-to minimise token consumption.  Already-processed papers are skipped
-automatically (idempotent).
+Steps 1 and 3 are fully deterministic and require no API calls.
+Step 2 is performed by the agent following the instructions in `CLAUDE.md`,
+or optionally via the OpenAI API (`--mode api`).
+Already-processed papers are skipped automatically (idempotent).
 
 ---
 
@@ -71,26 +76,9 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Quick start – run the full pipeline
+### Step 1 – Extract text from PDFs
 
-```bash
-export OPENAI_API_KEY="sk-..."   # required for Step 2 only
-
-# Place your PDF papers in the papers/ directory, then:
-bash run_pipeline.sh
-```
-
-Pass `--overwrite` to re-process papers that were already extracted / classified:
-
-```bash
-bash run_pipeline.sh --overwrite
-```
-
----
-
-### Step-by-step
-
-#### Step 1 – Extract text from PDFs
+Place your PDF papers in `papers/`, then run:
 
 ```bash
 python scripts/extract_text.py [--papers-dir papers/] [--output-dir data/extracted/] [--overwrite]
@@ -100,25 +88,40 @@ Reads every `*.pdf` in `papers/`, extracts text (up to 10 pages per file), and
 attempts to isolate the **abstract** section.  Outputs one JSON file per paper
 to `data/extracted/`.
 
-#### Step 2 – Classify SE subjects
+### Step 2 – Classify SE subjects
+
+#### Option A — Agent mode (default, recommended)
+
+If you are running inside an agentic CLI (Claude Code, GitHub Copilot, etc.),
+the agent reads `CLAUDE.md` and classifies each paper directly.  You can check
+what work remains at any time:
+
+```bash
+python scripts/classify.py          # prints status report of pending papers
+python scripts/classify.py --overwrite  # force re-classification of all papers
+```
+
+The agent then reads each `data/extracted/<stem>.json`, decides the
+classification, and writes `data/classifications/<stem>.json`.  Re-run the
+command above to track progress.
+
+#### Option B — API mode
+
+To classify via the OpenAI API instead of the agent:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-python scripts/classify.py [--extracted-dir data/extracted/] [--output-dir data/classifications/] \
-    [--model gpt-4o-mini] [--delay 0.5] [--overwrite]
+python scripts/classify.py --mode api [--model gpt-4o-mini] [--delay 0.5] [--overwrite]
 ```
-
-Sends the short `text_for_classification` excerpt from each extracted file to
-the OpenAI chat API and returns a structured JSON with the identified SWEBOK
-knowledge areas.  Outputs one JSON file per paper to `data/classifications/`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--mode` | `agent` | `agent` (status report) or `api` (OpenAI) |
 | `--model` | `gpt-4o-mini` | OpenAI model (use `gpt-4o` for higher accuracy) |
 | `--delay` | `0.5` | Seconds between API calls (rate-limit buffer) |
 | `--overwrite` | off | Re-classify already-classified papers |
 
-#### Step 3 – Generate histogram
+### Step 3 – Generate visualisations
 
 ```bash
 python scripts/visualize.py [--classifications-dir data/classifications/] \
@@ -135,20 +138,42 @@ Reads all classification files, counts subject frequencies, and produces:
 
 ---
 
+## Classification JSON format
+
+Each file written to `data/classifications/<stem>.json` has the following structure:
+
+```json
+{
+  "filename": "my_paper.pdf",
+  "stem": "my_paper",
+  "classification": {
+    "subjects": ["Software Testing", "Software Quality"],
+    "primary_subject": "Software Testing",
+    "summary": "One sentence describing the SE contribution of the paper.",
+    "confidence": "high"
+  }
+}
+```
+
+`confidence` is `"high"` when the paper clearly focuses on the area,
+`"medium"` for partial overlap, and `"low"` when the mapping is uncertain.
+
+---
+
 ## Repository structure
 
 ```
 qse-review/
-├── papers/                  ← upload your PDFs here (not tracked by git)
+├── papers/                  ← place your PDFs here (not tracked by git)
 ├── data/
 │   ├── extracted/           ← Step 1 output  (not tracked by git)
 │   ├── classifications/     ← Step 2 output  (not tracked by git)
 │   └── output/              ← Step 3 output  (tracked by git)
 ├── scripts/
 │   ├── extract_text.py      ← Step 1 script
-│   ├── classify.py          ← Step 2 script
+│   ├── classify.py          ← Step 2 status / API helper
 │   └── visualize.py         ← Step 3 script
-├── run_pipeline.sh          ← runs all three steps in sequence
+├── CLAUDE.md                ← agent instructions (classification task)
 ├── requirements.txt
 └── README.md
 ```
@@ -161,5 +186,7 @@ qse-review/
   PDF corpora externally (e.g. Google Drive, DVC, a shared network folder).
 * `data/classifications/` is also gitignored; commit only the final
   `data/output/` artefacts.
-* Token cost estimate: ~500–700 tokens/paper with `gpt-4o-mini`.
+* Token cost estimate (API mode): ~500–700 tokens/paper with `gpt-4o-mini`.
   Processing 500 papers costs roughly $0.20–$0.35 USD (as of 2025).
+* In agent mode there is no token cost beyond your existing Copilot/Claude
+  subscription.
