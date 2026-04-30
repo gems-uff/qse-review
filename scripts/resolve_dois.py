@@ -1,8 +1,9 @@
-"""Step 0 – Extract papers from the spreadsheet and resolve DOIs.
+"""Step 0 – Extract papers from spreadsheets and resolve DOIs.
 
-Reads ``papers/QSE - Papers.xlsx`` (or another path via ``--input``),
-extracts all paper entries (year, authors, title, source URL / DOI),
-and resolves a DOI for every entry that does not already have one via:
+Scans ``papers/`` for all ``.xlsx`` files (or uses a path given via
+``--input``), extracts all paper entries (year, authors, title, source
+URL / DOI), and resolves a DOI for every entry that does not already
+have one via:
 
   1. Regex extraction from the cell hyperlink URL (doi.org, dl.acm.org/doi/…).
   2. CrossRef title-search API (fallback, with respectful rate limiting).
@@ -57,7 +58,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-DEFAULT_INPUT = Path("papers/QSE - Papers.xlsx")
+DEFAULT_PAPERS_DIR = Path("papers")
 DEFAULT_OUTPUT = Path("out/dois.json")
 CROSSREF_TIMEOUT = 15  # seconds
 DBLP_TIMEOUT = 10  # seconds
@@ -366,14 +367,17 @@ def _write_unresolved_report(papers: list[dict], output_path: Path) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Extract papers from the QSE spreadsheet and resolve DOIs."
+        description="Extract papers from all spreadsheets in papers/ and resolve DOIs."
     )
     p.add_argument(
         "--input",
         type=Path,
-        default=DEFAULT_INPUT,
-        metavar="XLSX",
-        help=f"Path to the input spreadsheet (default: {DEFAULT_INPUT}).",
+        default=None,
+        metavar="XLSX_OR_DIR",
+        help=(
+            "Path to a specific .xlsx file, or a directory to scan for all .xlsx files "
+            f"(default: {DEFAULT_PAPERS_DIR})."
+        ),
     )
     p.add_argument(
         "--output",
@@ -442,17 +446,40 @@ def _load_cache(path: Path) -> dict:
         return {}
 
 
+def _find_xlsx_files(input_arg: Path | None) -> list[Path]:
+    """Return the list of .xlsx files to process."""
+    if input_arg is None:
+        target = DEFAULT_PAPERS_DIR
+    else:
+        target = input_arg
+
+    if target.is_file():
+        return [target]
+
+    if target.is_dir():
+        xlsx_files = sorted(target.glob("*.xlsx"))
+        if not xlsx_files:
+            logger.error("No .xlsx files found in %s", target)
+            raise SystemExit(1)
+        logger.info("Found %d spreadsheet(s): %s", len(xlsx_files), [f.name for f in xlsx_files])
+        return xlsx_files
+
+    logger.error("Input path not found: %s", target)
+    raise SystemExit(1)
+
+
 def main() -> None:
     args = _build_parser().parse_args()
 
-    if not args.input.exists():
-        logger.error("Spreadsheet not found: %s", args.input)
-        raise SystemExit(1)
+    xlsx_files = _find_xlsx_files(args.input)
 
     # Load the existing output as a cache (empty if --overwrite or file absent)
     cache = {} if args.overwrite else _load_cache(args.output)
 
-    papers = _parse_spreadsheet(args.input)
+    papers: list[dict] = []
+    for xlsx_path in xlsx_files:
+        logger.info("Parsing %s…", xlsx_path.name)
+        papers.extend(_parse_spreadsheet(xlsx_path))
 
     # Apply cache: reuse already-resolved entries; mark new/unresolved ones
     new_count = cached_count = 0

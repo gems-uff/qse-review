@@ -15,13 +15,13 @@ steps below in order.
 
 ## Pipeline
 
-### Step 0 – Resolve DOIs from the spreadsheet
+### Step 0 – Resolve DOIs from the spreadsheets
 
 ```bash
 python scripts/resolve_dois.py [--mailto your@email.com]
 ```
 
-Reads `papers/QSE - Papers.xlsx`, extracts all papers (year, authors, title,
+Scans `papers/` for all `.xlsx` files, extracts all papers (year, authors, title,
 hyperlink), and resolves a DOI for every entry via:
 
 1. Direct extraction from the cell hyperlink URL (doi.org, dl.acm.org/doi/…)
@@ -34,27 +34,17 @@ Writes `out/dois.json` (the canonical list for the next steps) and
 The script is **incremental**: re-running it only resolves papers that are new
 or still lack a DOI; already-resolved papers are reused from the existing
 `out/dois.json`.  Use `--overwrite` to reprocess everything from scratch.
+Use `--input <path>` to pass a specific file or directory instead of the default `papers/`.
 
-### Step 1 – Extract text from PDFs (when PDFs are available)
-
-```bash
-python scripts/extract_text.py
-```
-
-Reads every PDF in `papers/` and writes one JSON file per paper to
-`out/extracted/`.  Pass `--overwrite` to re-extract already-processed papers.
-
-### Step 1b – Fetch metadata from APIs (when PDFs are not available)
+### Step 1 – Fetch metadata from APIs
 
 ```bash
 python scripts/fetch_metadata.py [--mailto your@email.com]
 ```
 
 Reads `out/dois.json`, queries the **Semantic Scholar** API (with CrossRef as
-fallback) for each paper and writes one JSON file per paper to `out/extracted/`
-using the same schema as `extract_text.py`.  Use this step instead of Step 1
-when the PDFs are not locally available.  Pass `--overwrite` to re-fetch
-already-processed papers.
+fallback) for each paper and writes one JSON file per paper to `out/extracted/`.
+Pass `--overwrite` to re-fetch already-processed papers.
 
 ### Step 2 – Classify each paper (your task)
 
