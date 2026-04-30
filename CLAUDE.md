@@ -35,7 +35,7 @@ The script is **incremental**: re-running it only resolves papers that are new
 or still lack a DOI; already-resolved papers are reused from the existing
 `out/dois.json`.  Use `--overwrite` to reprocess everything from scratch.
 
-### Step 1 – Extract text from PDFs
+### Step 1 – Extract text from PDFs (when PDFs are available)
 
 ```bash
 python scripts/extract_text.py
@@ -43,6 +43,18 @@ python scripts/extract_text.py
 
 Reads every PDF in `papers/` and writes one JSON file per paper to
 `out/extracted/`.  Pass `--overwrite` to re-extract already-processed papers.
+
+### Step 1b – Fetch metadata from APIs (when PDFs are not available)
+
+```bash
+python scripts/fetch_metadata.py [--mailto your@email.com]
+```
+
+Reads `out/dois.json`, queries the **Semantic Scholar** API (with CrossRef as
+fallback) for each paper and writes one JSON file per paper to `out/extracted/`
+using the same schema as `extract_text.py`.  Use this step instead of Step 1
+when the PDFs are not locally available.  Pass `--overwrite` to re-fetch
+already-processed papers.
 
 ### Step 2 – Classify each paper (your task)
 
@@ -138,9 +150,13 @@ Current values:
 
 ## Tips
 
-- **Idempotency**: all scripts skip already-processed files by default.
-  Pass `--overwrite` to redo a step.
-- **Partial runs**: if you stop mid-way, already-written classification files
-  are preserved — just resume from where you left off.
+- **Incrementality**: every script in the pipeline is incremental by design.
+  Re-running any step only processes entries that are new or not yet handled;
+  already-produced output files are preserved and skipped.  This means that if
+  new papers are added to the spreadsheet you can simply re-run the pipeline
+  from Step 0 and only the new entries will be processed end-to-end.
+  Pass `--overwrite` to any script to force reprocessing of all entries.
+- **Partial runs**: if you stop mid-way, already-written files are preserved —
+  just resume from where you left off.
 - A paper may be tagged with **multiple** subjects; only include areas that are
   clearly relevant.
