@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # Configuration defaults (can be overridden via CLI flags)
 # ---------------------------------------------------------------------------
 PAPERS_DIR = Path("papers")
-EXTRACTED_DIR = Path("data/extracted")
+EXTRACTED_DIR = Path("out/extracted")
 MAX_PAGES = 10
 MAX_WORDS_FOR_CLASSIFICATION = 1500
 MIN_ABSTRACT_LENGTH = 100

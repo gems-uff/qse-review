@@ -28,9 +28,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-CLASSIFICATIONS_DIR = Path("data/classifications")
-SWEBOK_SUBJECTS_PATH = Path("data/swebok_subjects.json")
-OUTPUT_DIR = Path("data/output")
+CLASSIFICATIONS_DIR = Path("out/classifications")
+SWEBOK_SUBJECTS_PATH = Path("swebok_subjects.json")
+OUTPUT_DIR = Path("out/analysis")
 
 VALID_CONFIDENCE = {"high", "medium", "low"}
 

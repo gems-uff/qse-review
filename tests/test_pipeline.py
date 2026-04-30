@@ -97,7 +97,7 @@ def test_swebok_subjects_count():
 
 
 def test_swebok_subjects_file_exists():
-    subjects_path = Path(__file__).parent.parent / "data" / "swebok_subjects.json"
+    subjects_path = Path(__file__).parent.parent / "swebok_subjects.json"
     assert subjects_path.exists(), "data/swebok_subjects.json not found"
     with open(subjects_path) as f:
         data = json.load(f)

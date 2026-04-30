@@ -57,9 +57,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuration defaults
 # ---------------------------------------------------------------------------
-EXTRACTED_DIR = Path("data/extracted")
-CLASSIFICATIONS_DIR = Path("data/classifications")
-SWEBOK_SUBJECTS_PATH = Path("data/swebok_subjects.json")
+EXTRACTED_DIR = Path("out/extracted")
+CLASSIFICATIONS_DIR = Path("out/classifications")
+SWEBOK_SUBJECTS_PATH = Path("swebok_subjects.json")
 DEFAULT_MODEL = "gpt-4o-mini"
 VALID_CONFIDENCE = {"high", "medium", "low"}
 

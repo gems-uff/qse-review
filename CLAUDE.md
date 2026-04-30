@@ -22,17 +22,17 @@ python scripts/extract_text.py
 ```
 
 Reads every PDF in `papers/` and writes one JSON file per paper to
-`data/extracted/`.  Pass `--overwrite` to re-extract already-processed papers.
+`out/extracted/`.  Pass `--overwrite` to re-extract already-processed papers.
 
 ### Step 2 – Classify each paper (your task)
 
-For every file `data/extracted/<stem>.json` that does **not** already have a
-corresponding `data/classifications/<stem>.json`:
+For every file `out/extracted/<stem>.json` that does **not** already have a
+corresponding `out/classifications/<stem>.json`:
 
-1. Open `data/extracted/<stem>.json` and read the `text_for_classification`
+1. Open `out/extracted/<stem>.json` and read the `text_for_classification`
    field (abstract or first ~1 500 words).
 2. Classify the paper — decide which SWEBOK knowledge areas it addresses.
-3. Write the result to `data/classifications/<stem>.json` using the exact
+3. Write the result to `out/classifications/<stem>.json` using the exact
    format shown below.
 
 Optionally run the following command first to see which papers still need
@@ -58,17 +58,19 @@ python scripts/classify.py --mode api
 python scripts/visualize.py
 ```
 
-Reads `data/classifications/*.json` and writes to `data/output/`:
+Reads `out/classifications/*.json` and writes to `out/analysis/`:
 
-- `histogram.png` – bar chart of subject frequencies
+- `histogram.png` – bar chart of subject frequencies (all 15 SWEBOK areas)
+- `cooccurrence.png` – heatmap of subject co-occurrence
 - `paper_subjects.csv` – per-paper table
 - `subject_frequencies.json` – aggregate counts
+- `cooccurrence.json` – raw co-occurrence matrix
 
 ---
 
 ## Required JSON format for each classification
 
-Write raw JSON (no markdown fences) to `data/classifications/<stem>.json`:
+Write raw JSON (no markdown fences) to `out/classifications/<stem>.json`:
 
 ```json
 {
@@ -84,6 +86,9 @@ Write raw JSON (no markdown fences) to `data/classifications/<stem>.json`:
 ```
 
 ### Valid `subjects` values — use verbatim (exact match required)
+
+The canonical list lives in `swebok_subjects.json` at the project root.
+Current values:
 
 - Software Requirements
 - Software Architecture

@@ -18,16 +18,18 @@ also available for fully automated runs.
 papers/*.pdf
     │
     ▼ Step 1 – extract_text.py      (deterministic, no LLM)
-data/extracted/*.json
+out/extracted/*.json
     │
     ▼ Step 2 – agent reads & classifies   ← YOU (or --mode api)
-data/classifications/*.json
+out/classifications/*.json
     │
     ▼ Step 3 – visualize.py         (deterministic, no LLM)
-data/output/
+out/analysis/
   ├── histogram.png
+  ├── cooccurrence.png
   ├── paper_subjects.csv
-  └── subject_frequencies.json
+  ├── subject_frequencies.json
+  └── cooccurrence.json
 ```
 
 Steps 1 and 3 are fully deterministic and require no API calls.
@@ -39,7 +41,7 @@ Already-processed papers are skipped automatically (idempotent).
 
 ## SE Knowledge Areas (taxonomy)
 
-The taxonomy follows **SWEBOK 4th Edition**:
+The taxonomy follows **SWEBOK 4th Edition** and is defined in `swebok_subjects.json`:
 
 | # | Knowledge Area |
 |---|----------------|
@@ -70,6 +72,10 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 
 # 2. Install dependencies
 pip install -r requirements.txt
+
+# 3. Optional: OCR fallback for image-only PDFs
+#    pip install pdf2image pytesseract
+#    brew install tesseract poppler   # macOS
 ```
 
 ---
@@ -81,12 +87,15 @@ pip install -r requirements.txt
 Place your PDF papers in `papers/`, then run:
 
 ```bash
-python scripts/extract_text.py [--papers-dir papers/] [--output-dir data/extracted/] [--overwrite]
+python scripts/extract_text.py [--papers-dir papers/] [--output-dir out/extracted/] [--overwrite] [--ocr]
 ```
 
 Reads every `*.pdf` in `papers/`, extracts text (up to 10 pages per file), and
 attempts to isolate the **abstract** section.  Outputs one JSON file per paper
-to `data/extracted/`.
+to `out/extracted/`.
+
+Pass `--ocr` (or install `tesseract` to auto-enable it) to activate OCR fallback
+for scanned / image-only PDFs.
 
 ### Step 2 – Classify SE subjects
 
@@ -101,9 +110,8 @@ python scripts/classify.py          # prints status report of pending papers
 python scripts/classify.py --overwrite  # force re-classification of all papers
 ```
 
-The agent then reads each `data/extracted/<stem>.json`, decides the
-classification, and writes `data/classifications/<stem>.json`.  Re-run the
-command above to track progress.
+The agent then reads each `out/extracted/<stem>.json`, decides the
+classification, and writes `out/classifications/<stem>.json`.
 
 #### Option B — API mode
 
@@ -124,23 +132,26 @@ python scripts/classify.py --mode api [--model gpt-4o-mini] [--delay 0.5] [--ove
 ### Step 3 – Generate visualisations
 
 ```bash
-python scripts/visualize.py [--classifications-dir data/classifications/] \
-    [--output-dir data/output/] [--title "SE Knowledge Areas in QSE Literature"]
+python scripts/visualize.py [--classifications-dir out/classifications/] \
+    [--output-dir out/analysis/] [--title "SE Knowledge Areas in QSE Literature"] \
+    [--hide-empty] [--min-confidence high|medium|low]
 ```
 
 Reads all classification files, counts subject frequencies, and produces:
 
 | Output file | Description |
 |-------------|-------------|
-| `histogram.png` | Horizontal bar chart sorted by frequency |
+| `histogram.png` | Horizontal bar chart with all 15 SWEBOK areas |
+| `cooccurrence.png` | Heatmap of subject co-occurrence |
 | `paper_subjects.csv` | Per-paper table (filename, subjects, summary, …) |
 | `subject_frequencies.json` | Subject → paper count mapping |
+| `cooccurrence.json` | Raw co-occurrence matrix |
 
 ---
 
 ## Classification JSON format
 
-Each file written to `data/classifications/<stem>.json` has the following structure:
+Each file written to `out/classifications/<stem>.json` has the following structure:
 
 ```json
 {
@@ -151,6 +162,11 @@ Each file written to `data/classifications/<stem>.json` has the following struct
     "primary_subject": "Software Testing",
     "summary": "One sentence describing the SE contribution of the paper.",
     "confidence": "high"
+  },
+  "metadata": {
+    "classified_at": "2025-01-01T00:00:00+00:00",
+    "classifier": "agent",
+    "model": null
   }
 }
 ```
@@ -164,15 +180,20 @@ Each file written to `data/classifications/<stem>.json` has the following struct
 
 ```
 qse-review/
-├── papers/                  ← place your PDFs here (not tracked by git)
-├── data/
-│   ├── extracted/           ← Step 1 output  (not tracked by git)
-│   ├── classifications/     ← Step 2 output  (not tracked by git)
-│   └── output/              ← Step 3 output  (tracked by git)
+├── papers/                  ← place your PDFs here (gitignored)
+├── out/                     ← all pipeline output (gitignored; auto-created)
+│   ├── extracted/           ← Step 1 output
+│   ├── classifications/     ← Step 2 output
+│   └── analysis/            ← Step 3 output
+├── tests/
+│   ├── fixtures/
+│   │   └── papers/          ← sample PDFs for testing
+│   └── test_pipeline.py
 ├── scripts/
 │   ├── extract_text.py      ← Step 1 script
 │   ├── classify.py          ← Step 2 status / API helper
 │   └── visualize.py         ← Step 3 script
+├── swebok_subjects.json     ← canonical SWEBOK taxonomy (15 knowledge areas)
 ├── CLAUDE.md                ← agent instructions (classification task)
 ├── requirements.txt
 └── README.md
@@ -182,10 +203,8 @@ qse-review/
 
 ## Notes
 
-* `papers/` and `data/extracted/` are listed in `.gitignore`; store large
-  PDF corpora externally (e.g. Google Drive, DVC, a shared network folder).
-* `data/classifications/` is also gitignored; commit only the final
-  `data/output/` artefacts.
+* `papers/` and `out/` are listed in `.gitignore`; store large PDF corpora
+  externally (e.g. Google Drive, DVC, a shared network folder).
 * Token cost estimate (API mode): ~500–700 tokens/paper with `gpt-4o-mini`.
   Processing 500 papers costs roughly $0.20–$0.35 USD (as of 2025).
 * In agent mode there is no token cost beyond your existing Copilot/Claude
