@@ -228,6 +228,8 @@ def main() -> None:
                         help="Seconds between API calls (default: 1.0).")
     parser.add_argument("--mailto", default=None,
                         help="Email for polite-pool header (CrossRef).")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Stop after processing at most N new papers (skips already-fetched ones).")
     args = parser.parse_args()
 
     if not DOIS_PATH.exists():
@@ -240,6 +242,7 @@ def main() -> None:
     logger.info("Loaded %d papers from %s.", len(papers), DOIS_PATH)
 
     skipped = success = no_abstract = errors = 0
+    processed = 0  # counts papers actually fetched (not skipped)
 
     for i, paper in enumerate(papers, 1):
         doi = paper.get("doi")
@@ -257,6 +260,10 @@ def main() -> None:
             logger.debug("skip (exists): %s", out_path.name)
             skipped += 1
             continue
+
+        if args.limit is not None and processed >= args.limit:
+            logger.info("Reached --limit %d, stopping early.", args.limit)
+            break
 
         logger.info("[%d/%d] %s", i, len(papers), title[:80])
 
@@ -291,6 +298,7 @@ def main() -> None:
         else:
             no_abstract += 1
             logger.warning("  no abstract found: %s", title[:60])
+        processed += 1
 
     logger.info(
         "Done. success=%d  no_abstract=%d  skipped=%d  errors=%d",

@@ -233,6 +233,7 @@ def _run_api_mode(args: argparse.Namespace) -> None:
 
     success = errors = skipped = 0
     total_tokens = 0
+    processed = 0  # counts papers actually classified (not skipped)
 
     for extracted_path in iterator:
         output_path = args.output_dir / extracted_path.name
@@ -241,6 +242,10 @@ def _run_api_mode(args: argparse.Namespace) -> None:
             logger.info("  skip (already classified): %s", extracted_path.name)
             skipped += 1
             continue
+
+        if args.limit is not None and processed >= args.limit:
+            logger.info("Reached --limit %d, stopping early.", args.limit)
+            break
 
         with open(extracted_path, encoding="utf-8") as fh:
             extracted_data = json.load(fh)
@@ -272,6 +277,7 @@ def _run_api_mode(args: argparse.Namespace) -> None:
         else:
             success += 1
             total_tokens += classification.get("tokens_used", 0)
+            processed += 1
 
         output_data = {
             "filename": extracted_data["filename"],
@@ -366,6 +372,9 @@ def _run_agent_mode(args: argparse.Namespace) -> None:
         print(f"  Run `python scripts/visualize.py` to generate the histogram.\n")
         return
 
+    if args.limit is not None:
+        pending = pending[: args.limit]
+
     for i, paper in enumerate(pending, 1):
         print(f"[{i}/{len(pending)}] {paper['filename']}")
         print(f"  Output : {paper['output_path']}")
@@ -423,6 +432,12 @@ def main(argv: list[str] | None = None) -> None:
         type=float,
         default=0.5,
         help="Seconds to wait between API calls in api mode (default: 0.5).",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Process at most N pending papers (skips already-classified ones).",
     )
     args = parser.parse_args(argv)
 
