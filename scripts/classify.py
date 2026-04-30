@@ -1,48 +1,33 @@
-"""Step 2 – Classify SE subjects in each paper using an LLM.
+"""Classify SE subjects in each paper.
 
 Two operating modes are supported via ``--mode``:
 
-``api`` (default)
-    Calls the OpenAI API directly for each paper (original behaviour).
+``agent`` (default)
+    Prints a status report listing every extracted paper that has not yet been
+    classified, together with a short excerpt of its text.  This gives an
+    agentic CLI (Claude Code, Copilot CLI, etc.) quick visibility into what
+    work remains.  The agent then reads each ``data/extracted/<stem>.json``
+    file, decides the classification, and writes the result to
+    ``data/classifications/<stem>.json`` following the instructions in
+    ``CLAUDE.md``.
+
+``api``
+    Calls the OpenAI API directly for each unclassified paper.
     Requires the ``OPENAI_API_KEY`` environment variable.
-
-``agent``
-    Designed to run inside an agentic CLI environment (Claude Code,
-    Copilot CLI, etc.).  Instead of calling an API the script prints each
-    prompt file from ``data/prompts/`` to **stdout** one at a time, then
-    waits for the agent to write the corresponding classification JSON to
-    ``data/classifications/<stem>.json`` before moving on to the next paper.
-
-    The agent is responsible for reading the prompt, deciding the
-    classification, and writing the JSON file in the exact format described
-    in the prompt.  Run ``generate_prompts.py`` first to create the prompt
-    files.
-
-For each JSON file produced by ``extract_text.py`` the script sends the
-``text_for_classification`` field (abstract or first ~1 500 words) to an
-OpenAI chat model and asks it to label the paper with one or more
-**SWEBOK knowledge areas**.
-
-Design choices to minimise token consumption:
-  - Only the short ``text_for_classification`` excerpt is sent (not the full
-    paper text).
-  - ``temperature=0`` makes responses deterministic / cacheable.
-  - Already-classified papers are skipped unless ``--overwrite`` is given.
-  - A configurable ``--delay`` avoids rate-limit errors.
 
 The classification JSON written per paper:
   - ``filename``        – original PDF file name
   - ``stem``            – paper identifier (PDF stem)
-  - ``classification``  – LLM output dict:
+  - ``classification``  – classification dict:
       - ``subjects``         – list of matched SWEBOK knowledge areas
       - ``primary_subject``  – most prominent area
       - ``summary``          – one-sentence SE contribution summary
       - ``confidence``       – "high" | "medium" | "low"
-      - ``tokens_used``      – total tokens consumed for this call (api mode only)
+      - ``tokens_used``      – total tokens consumed (api mode only)
 
 Prerequisites:
-  ``api`` mode: set the ``OPENAI_API_KEY`` environment variable before running.
-  ``agent`` mode: run ``generate_prompts.py`` first.
+  ``agent`` mode: run ``extract_text.py`` first.
+  ``api`` mode: run ``extract_text.py`` first and set ``OPENAI_API_KEY``.
 """
 
 import argparse
@@ -69,7 +54,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 EXTRACTED_DIR = Path("data/extracted")
 CLASSIFICATIONS_DIR = Path("data/classifications")
-PROMPTS_DIR = Path("data/prompts")
 DEFAULT_MODEL = "gpt-4o-mini"
 
 # SWEBOK 4th Edition Knowledge Areas used as the classification taxonomy
@@ -240,99 +224,89 @@ def _run_api_mode(args: argparse.Namespace) -> None:
 
 
 def _run_agent_mode(args: argparse.Namespace) -> None:
-    """Print each prompt to stdout so an agentic CLI can classify it.
+    """Print a status report of papers that still need classification.
 
-    The agent is expected to:
-      1. Read the prompt printed to stdout.
-      2. Decide the classification.
-      3. Write the JSON result to ``data/classifications/<stem>.json``
-         in the exact format described inside the prompt.
-
-    The script then polls for the output file before moving to the next paper,
-    so the agent and this script stay in sync when the agent processes papers
-    sequentially (which is the normal case for agentic CLIs).
+    This gives an agentic CLI quick visibility into what work remains so it
+    can proceed to classify each ``data/extracted/<stem>.json`` and write the
+    result to ``data/classifications/<stem>.json`` following ``CLAUDE.md``.
     """
-    if not args.prompts_dir.exists():
-        logger.error(
-            "Prompts directory not found: %s\n"
-            "Run 'python scripts/generate_prompts.py' first.",
-            args.prompts_dir,
-        )
+    if not args.extracted_dir.exists():
+        logger.error("Extracted directory not found: %s", args.extracted_dir)
         sys.exit(1)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    prompt_files = sorted(args.prompts_dir.glob("*.md"))
-    if not prompt_files:
-        logger.warning(
-            "No prompt files found in %s. "
-            "Run 'python scripts/generate_prompts.py' first.",
-            args.prompts_dir,
-        )
+    extracted_files = sorted(args.extracted_dir.glob("*.json"))
+    if not extracted_files:
+        logger.warning("No extracted JSON files found in %s", args.extracted_dir)
         sys.exit(0)
 
-    logger.info(
-        "Agent mode — %d prompt file(s) to process.", len(prompt_files)
-    )
+    _EXCERPT_LEN = 300  # characters to show per paper
 
-    success = skipped = 0
+    pending = []
+    done = []
 
-    for prompt_path in prompt_files:
-        stem = prompt_path.stem
-        output_path = args.output_dir / f"{stem}.json"
-
+    for extracted_path in extracted_files:
+        output_path = args.output_dir / extracted_path.name
         if output_path.exists() and not args.overwrite:
-            logger.info("  skip (already classified): %s", stem)
-            skipped += 1
+            done.append(extracted_path.stem)
             continue
 
-        # Print the prompt so the agent can read it and act on it.
-        prompt_text = prompt_path.read_text(encoding="utf-8")
-        print("\n" + "=" * 72)
-        print(f"CLASSIFY: {stem}  ({success + skipped + 1}/{len(prompt_files)})")
-        print("=" * 72)
-        print(prompt_text)
-        print("=" * 72)
-        print(
-            f"\n[classify.py] Waiting for the agent to write: {output_path}\n"
-            "[classify.py] Please create that file now, then press Enter to continue."
+        with open(extracted_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+
+        if data.get("error"):
+            logger.warning("  skip (extraction error): %s", extracted_path.name)
+            continue
+
+        excerpt = data.get("text_for_classification", "").strip()
+        pending.append(
+            {
+                "stem": extracted_path.stem,
+                "filename": data.get("filename", extracted_path.name),
+                "excerpt": excerpt[:_EXCERPT_LEN] + ("…" if len(excerpt) > _EXCERPT_LEN else ""),
+                "output_path": str(output_path),
+            }
         )
-        sys.stdout.flush()
 
-        # Wait for the agent to create the output file.
-        input()
+    print(f"\n{'=' * 72}")
+    print(f"QSE Classification Status — {len(done)} done, {len(pending)} pending")
+    print(f"{'=' * 72}\n")
 
-        if output_path.exists():
-            logger.info("  classified: %s", stem)
-            success += 1
-        else:
-            logger.warning(
-                "  output file not found after confirmation: %s", output_path
-            )
+    if not pending:
+        print("✓ All papers have been classified.")
+        print(f"  Run `python scripts/visualize.py` to generate the histogram.\n")
+        return
 
-    logger.info(
-        "Agent classification complete — success: %d  skipped: %d",
-        success,
-        skipped,
+    for i, paper in enumerate(pending, 1):
+        print(f"[{i}/{len(pending)}] {paper['filename']}")
+        print(f"  Output : {paper['output_path']}")
+        print(f"  Excerpt: {paper['excerpt']}")
+        print()
+
+    print(
+        "Read CLAUDE.md for the required JSON format, then write each\n"
+        "data/classifications/<stem>.json file and re-run this command to\n"
+        "check progress.\n"
     )
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Classify SE subjects in extracted paper texts using an LLM.\n\n"
+            "Classify SE subjects in extracted paper texts.\n\n"
             "Modes:\n"
-            "  api   – call OpenAI API directly (requires OPENAI_API_KEY)\n"
-            "  agent – print prompts to stdout for an agentic CLI to classify\n"
-            "          (requires 'generate_prompts.py' to have been run first)"
+            "  agent (default) – print a status report of unclassified papers\n"
+            "                    so an agentic CLI knows what work remains\n"
+            "  api             – call OpenAI API directly (requires OPENAI_API_KEY)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--mode",
         choices=["api", "agent"],
-        default="api",
-        help="Classification mode: 'api' (default) or 'agent'.",
+        default="agent",
+        help="Classification mode: 'agent' (default) or 'api'.",
     )
     parser.add_argument(
         "--extracted-dir",
@@ -345,12 +319,6 @@ def main(argv: list[str] | None = None) -> None:
         type=Path,
         default=CLASSIFICATIONS_DIR,
         help="Directory to save classification JSON files (default: data/classifications/)",
-    )
-    parser.add_argument(
-        "--prompts-dir",
-        type=Path,
-        default=PROMPTS_DIR,
-        help="Directory with prompt Markdown files, used in agent mode (default: data/prompts/)",
     )
     parser.add_argument(
         "--model",
