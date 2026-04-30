@@ -1,0 +1,10 @@
+{
+  "filename": "qse_requirements_engineering.pdf",
+  "stem": "qse_requirements_engineering",
+  "classification": {
+    "subjects": ["Software Requirements", "Software Quality"],
+    "primary_subject": "Software Requirements",
+    "summary": "Catalogues quantum-specific requirement smells and proposes an IEEE 830 extension template with qubit budget, gate depth, noise tolerance, and classical fallback attributes.",
+    "confidence": "high"
+  }
+}

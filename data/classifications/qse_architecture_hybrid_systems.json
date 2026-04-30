@@ -1,0 +1,10 @@
+{
+  "filename": "qse_architecture_hybrid_systems.pdf",
+  "stem": "qse_architecture_hybrid_systems",
+  "classification": {
+    "subjects": ["Software Architecture", "Software Design"],
+    "primary_subject": "Software Architecture",
+    "summary": "Identifies and characterises five recurring architectural patterns for hybrid classical-quantum systems validated through VQE and QAOA case studies.",
+    "confidence": "high"
+  }
+}

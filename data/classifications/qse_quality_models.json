@@ -1,0 +1,10 @@
+{
+  "filename": "qse_quality_models.pdf",
+  "stem": "qse_quality_models",
+  "classification": {
+    "subjects": ["Software Quality", "Software Engineering Models and Methods"],
+    "primary_subject": "Software Quality",
+    "summary": "Proposes QualQ, an extension of ISO/IEC 25010 with four quantum-specific quality sub-characteristics and eleven QASM-based metrics validated on 95 GitHub programs.",
+    "confidence": "high"
+  }
+}

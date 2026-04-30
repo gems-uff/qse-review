@@ -1,0 +1,10 @@
+{
+  "filename": "qse_testing_quantum_circuits.pdf",
+  "stem": "qse_testing_quantum_circuits",
+  "classification": {
+    "subjects": ["Software Testing", "Software Quality"],
+    "primary_subject": "Software Testing",
+    "summary": "Proposes a mutation-testing framework for quantum circuits that adapts classical test adequacy criteria to the quantum domain, achieving 91% defect detection.",
+    "confidence": "high"
+  }
+}

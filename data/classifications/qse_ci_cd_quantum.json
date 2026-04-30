@@ -1,0 +1,10 @@
+{
+  "filename": "qse_ci_cd_quantum.pdf",
+  "stem": "qse_ci_cd_quantum",
+  "classification": {
+    "subjects": ["Software Construction", "Software Engineering Process", "Software Testing"],
+    "primary_subject": "Software Engineering Process",
+    "summary": "Presents QFlow, a CI/CD framework for quantum software that reduces regression detection time by 63% through noise-aware simulation and statistical flakiness detection.",
+    "confidence": "high"
+  }
+}
