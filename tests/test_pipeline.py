@@ -249,7 +249,7 @@ def test_swebok_subjects_count():
 
 def test_swebok_subjects_file_exists():
     subjects_path = Path(__file__).parent.parent / "swebok_subjects.json"
-    assert subjects_path.exists(), "data/swebok_subjects.json not found"
+    assert subjects_path.exists(), "swebok_subjects.json not found at project root"
     with open(subjects_path) as f:
         data = json.load(f)
     assert len(data) == 15

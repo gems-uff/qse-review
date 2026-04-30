@@ -6,9 +6,9 @@ Two operating modes are supported via ``--mode``:
     Prints a status report listing every extracted paper that has not yet been
     classified, together with a short excerpt of its text.  This gives an
     agentic CLI (Claude Code, Copilot CLI, etc.) quick visibility into what
-    work remains.  The agent then reads each ``data/extracted/<stem>.json``
+    work remains.  The agent then reads each ``out/extracted/<stem>.json``
     file, decides the classification, and writes the result to
-    ``data/classifications/<stem>.json`` following the instructions in
+    ``out/classifications/<stem>.json`` following the instructions in
     ``CLAUDE.md``.
 
 ``api``
@@ -303,8 +303,8 @@ def _run_agent_mode(args: argparse.Namespace) -> None:
     """Print a status report of papers that still need classification.
 
     This gives an agentic CLI quick visibility into what work remains so it
-    can proceed to classify each ``data/extracted/<stem>.json`` and write the
-    result to ``data/classifications/<stem>.json`` following ``CLAUDE.md``.
+    can proceed to classify each ``out/extracted/<stem>.json`` and write the
+    result to ``out/classifications/<stem>.json`` following ``CLAUDE.md``.
     """
     if not args.extracted_dir.exists():
         logger.error("Extracted directory not found: %s", args.extracted_dir)
@@ -374,7 +374,7 @@ def _run_agent_mode(args: argparse.Namespace) -> None:
 
     print(
         "Read CLAUDE.md for the required JSON format, then write each\n"
-        "data/classifications/<stem>.json file and re-run this command to\n"
+        "out/classifications/<stem>.json file and re-run this command to\n"
         "check progress.\n"
     )
 
@@ -400,13 +400,13 @@ def main(argv: list[str] | None = None) -> None:
         "--extracted-dir",
         type=Path,
         default=EXTRACTED_DIR,
-        help="Directory with extracted paper JSON files (default: data/extracted/)",
+        help="Directory with extracted paper JSON files (default: out/extracted/)",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=CLASSIFICATIONS_DIR,
-        help="Directory to save classification JSON files (default: data/classifications/)",
+        help="Directory to save classification JSON files (default: out/classifications/)",
     )
     parser.add_argument(
         "--model",

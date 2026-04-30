@@ -117,13 +117,13 @@ def main(argv: list[str] | None = None) -> None:
         "--classifications-dir",
         type=Path,
         default=CLASSIFICATIONS_DIR,
-        help="Directory with classification JSON files (default: data/classifications/)",
+        help="Directory with classification JSON files (default: out/classifications/)",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=OUTPUT_DIR,
-        help="Directory to save output files (default: data/output/)",
+        help="Directory to save output files (default: out/analysis/)",
     )
     parser.add_argument(
         "--title",

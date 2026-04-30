@@ -12,8 +12,9 @@ dist/
 build/
 .eggs/
 
-# PDFs – store externally (e.g. Google Drive, DVC); place in papers/ to run
-papers/*.pdf
+# Input data – store externally; place in papers/ to run the pipeline
+papers/*
+!papers/.gitkeep
 
 # OS / editor artefacts
 .DS_Store
