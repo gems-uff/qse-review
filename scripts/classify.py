@@ -24,6 +24,10 @@ The classification JSON written per paper:
       - ``summary``          – one-sentence SE contribution summary
       - ``confidence``       – "high" | "medium" | "low"
       - ``tokens_used``      – total tokens consumed (api mode only)
+  - ``metadata``        – provenance dict:
+      - ``classified_at``    – ISO-8601 timestamp
+      - ``classifier``       – "agent" or "api"
+      - ``model``            – model name (api mode only)
 
 Prerequisites:
   ``agent`` mode: run ``extract_text.py`` first.
@@ -36,6 +40,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -54,26 +59,38 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 EXTRACTED_DIR = Path("data/extracted")
 CLASSIFICATIONS_DIR = Path("data/classifications")
+SWEBOK_SUBJECTS_PATH = Path("data/swebok_subjects.json")
 DEFAULT_MODEL = "gpt-4o-mini"
+VALID_CONFIDENCE = {"high", "medium", "low"}
 
-# SWEBOK 4th Edition Knowledge Areas used as the classification taxonomy
-SE_SUBJECTS: list[str] = [
-    "Software Requirements",
-    "Software Architecture",
-    "Software Design",
-    "Software Construction",
-    "Software Testing",
-    "Software Maintenance",
-    "Software Configuration Management",
-    "Software Engineering Management",
-    "Software Engineering Process",
-    "Software Engineering Models and Methods",
-    "Software Quality",
-    "Software Engineering Professional Practice",
-    "Software Engineering Economics",
-    "Software Security",
-    "Software Safety",
-]
+
+def _load_se_subjects() -> list[str]:
+    """Load SWEBOK knowledge areas from the canonical JSON file."""
+    if SWEBOK_SUBJECTS_PATH.exists():
+        with open(SWEBOK_SUBJECTS_PATH, encoding="utf-8") as fh:
+            return json.load(fh)
+    # Fallback: inline list (kept in sync via tests)
+    return [
+        "Software Requirements",
+        "Software Architecture",
+        "Software Design",
+        "Software Construction",
+        "Software Testing",
+        "Software Maintenance",
+        "Software Configuration Management",
+        "Software Engineering Management",
+        "Software Engineering Process",
+        "Software Engineering Models and Methods",
+        "Software Quality",
+        "Software Engineering Professional Practice",
+        "Software Engineering Economics",
+        "Software Security",
+        "Software Safety",
+    ]
+
+
+SE_SUBJECTS: list[str] = _load_se_subjects()
+SE_SUBJECTS_SET: set[str] = set(SE_SUBJECTS)
 
 _SYSTEM_PROMPT = """\
 You are an expert in Software Engineering (SE) and Quantum Computing.
@@ -96,10 +113,40 @@ Respond ONLY with a JSON object in exactly this format (no extra keys):
 
 
 # ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+def _validate_classification(clf: dict, stem: str) -> list[str]:
+    """Return a list of validation error strings (empty = valid)."""
+    errors: list[str] = []
+    subjects = clf.get("subjects")
+    if not isinstance(subjects, list) or not subjects:
+        errors.append("'subjects' must be a non-empty list")
+    else:
+        invalid = [s for s in subjects if s not in SE_SUBJECTS_SET]
+        if invalid:
+            errors.append(f"unknown subjects: {invalid}")
+
+    primary = clf.get("primary_subject")
+    if not isinstance(primary, str) or not primary:
+        errors.append("'primary_subject' must be a non-empty string")
+    elif subjects and primary not in subjects:
+        errors.append(f"'primary_subject' ({primary!r}) not in subjects list")
+
+    confidence = clf.get("confidence")
+    if confidence not in VALID_CONFIDENCE:
+        errors.append(f"'confidence' must be one of {sorted(VALID_CONFIDENCE)}, got {confidence!r}")
+
+    if errors:
+        logger.warning("Validation errors in %s: %s", stem, "; ".join(errors))
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # LLM call
 # ---------------------------------------------------------------------------
 
-def classify_paper(client: OpenAI, model: str, text: str, filename: str) -> dict:
+def classify_paper(client: "OpenAI", model: str, text: str, filename: str) -> dict:
     """Return classification dict for a single paper excerpt."""
     subjects_list = "\n".join(f"- {s}" for s in SE_SUBJECTS)
 
@@ -112,19 +159,37 @@ def classify_paper(client: OpenAI, model: str, text: str, filename: str) -> dict
         f"summary, confidence."
     )
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0,
-    )
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0,
+            )
+            result: dict = json.loads(response.choices[0].message.content)
+            result["tokens_used"] = response.usage.total_tokens
 
-    result: dict = json.loads(response.choices[0].message.content)
-    result["tokens_used"] = response.usage.total_tokens
-    return result
+            errors = _validate_classification(result, filename)
+            if errors:
+                result["validation_errors"] = errors
+
+            return result
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < 3:
+                wait = 2 ** attempt
+                logger.warning(
+                    "  API error (attempt %d/3) for %s: %s — retrying in %ds",
+                    attempt, filename, exc, wait,
+                )
+                time.sleep(wait)
+
+    raise last_exc  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -160,10 +225,16 @@ def _run_api_mode(args: argparse.Namespace) -> None:
 
     client = OpenAI(api_key=api_key)
 
+    try:
+        from tqdm import tqdm  # type: ignore[import]
+        iterator = tqdm(extracted_files, desc="Classifying", unit="paper")
+    except ImportError:
+        iterator = extracted_files  # type: ignore[assignment]
+
     success = errors = skipped = 0
     total_tokens = 0
 
-    for extracted_path in extracted_files:
+    for extracted_path in iterator:
         output_path = args.output_dir / extracted_path.name
 
         if output_path.exists() and not args.overwrite:
@@ -206,6 +277,11 @@ def _run_api_mode(args: argparse.Namespace) -> None:
             "filename": extracted_data["filename"],
             "stem": extracted_path.stem,
             "classification": classification,
+            "metadata": {
+                "classified_at": datetime.now(timezone.utc).isoformat(),
+                "classifier": "api",
+                "model": args.model,
+            },
         }
 
         with open(output_path, "w", encoding="utf-8") as fh:
@@ -249,6 +325,18 @@ def _run_agent_mode(args: argparse.Namespace) -> None:
     for extracted_path in extracted_files:
         output_path = args.output_dir / extracted_path.name
         if output_path.exists() and not args.overwrite:
+            # Validate existing classification and warn on issues
+            with open(output_path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            clf = data.get("classification", {})
+            if "error" not in clf:
+                errs = _validate_classification(clf, extracted_path.stem)
+                if errs:
+                    logger.warning(
+                        "  existing classification has errors (%s): %s",
+                        extracted_path.stem,
+                        "; ".join(errs),
+                    )
             done.append(extracted_path.stem)
             continue
 

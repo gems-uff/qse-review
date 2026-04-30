@@ -2,8 +2,10 @@
 
 For each PDF found in ``papers/``, this script:
   1. Reads up to ``MAX_PAGES`` pages with *pdfplumber*.
-  2. Tries to isolate the **abstract** using common section-header patterns.
-  3. Writes a JSON file to ``data/extracted/`` that downstream scripts use.
+  2. Falls back to OCR (pytesseract + pdf2image) if text layer is empty/minimal
+     and ``--ocr`` is requested or tesseract is auto-detected.
+  3. Tries to isolate the **abstract** using common section-header patterns.
+  4. Writes a JSON file to ``data/extracted/`` that downstream scripts use.
 
 The JSON payload per paper:
   - ``filename``              – original PDF file name
@@ -12,6 +14,7 @@ The JSON payload per paper:
   - ``abstract``              – detected abstract section (or ``null``)
   - ``text_for_classification`` – abstract if found; else first
                                   ``MAX_WORDS_FOR_CLASSIFICATION`` words
+  - ``ocr_used``              – True when OCR fallback was triggered
   - ``error``                 – error message if extraction failed
 """
 
@@ -19,6 +22,7 @@ import argparse
 import json
 import logging
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -35,9 +39,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 PAPERS_DIR = Path("papers")
 EXTRACTED_DIR = Path("data/extracted")
-MAX_PAGES = 10  # maximum pages per PDF to read
-MAX_WORDS_FOR_CLASSIFICATION = 1500  # words sent to LLM when abstract not found
-MIN_ABSTRACT_LENGTH = 100  # minimum character length to accept an abstract match
+MAX_PAGES = 10
+MAX_WORDS_FOR_CLASSIFICATION = 1500
+MIN_ABSTRACT_LENGTH = 100
+MIN_TEXT_FOR_OCR = 200  # characters below this threshold triggers OCR fallback
 
 
 # ---------------------------------------------------------------------------
@@ -47,12 +52,14 @@ MIN_ABSTRACT_LENGTH = 100  # minimum character length to accept an abstract matc
 def _extract_abstract(text: str) -> str | None:
     """Return the abstract section from *text*, or ``None`` if not found."""
     patterns = [
-        # "Abstract" header followed by body text until double-newline
-        r"(?i)\babstract\b[\s:—-]*\n+(.*?)(?=\n\s*\n)",
-        # Inline "Abstract—" style (IEEE)
-        r"(?i)\babstract[—–-](.*?)(?=\n[A-Z\d]+[\.\s]|keywords|introduction)",
-        # "Abstract:" style
-        r"(?i)\babstract:\s+(.*?)(?=\n\s*\n|keywords|introduction)",
+        # IEEE inline: "Abstract—" or "Abstract—" (em-dash / en-dash)
+        r"(?i)\babstract\s*[—–]\s*(.*?)(?=\n\s*(?:keywords|index\s+terms|i+\.\s+introduction|1[\.\s]+introduction)|\Z)",
+        # Standard header followed by body text until double-newline or known section
+        r"(?i)\babstract\b[\s:—–\-]*\n+(.*?)(?=\n\s*\n|\n\s*(?:keywords|index\s+terms|introduction))",
+        # "Abstract:" inline style
+        r"(?i)\babstract:\s+(.*?)(?=\n\s*\n|\n\s*(?:keywords|index\s+terms|introduction))",
+        # Springer / generic period style: "Abstract. Body text…"
+        r"(?i)\babstract\.\s+(.*?)(?=\n\s*\n|\n\s*(?:keywords|introduction))",
     ]
 
     for pattern in patterns:
@@ -65,7 +72,33 @@ def _extract_abstract(text: str) -> str | None:
     return None
 
 
-def extract_text_from_pdf(pdf_path: Path) -> dict:
+def _ocr_fallback(pdf_path: Path, max_pages: int) -> str:
+    """Return OCR'd text for *pdf_path* using pytesseract + pdf2image."""
+    try:
+        from pdf2image import convert_from_path  # type: ignore[import]
+        import pytesseract  # type: ignore[import]
+    except ImportError:
+        logger.warning(
+            "OCR fallback requested but pdf2image/pytesseract are not installed. "
+            "Run: pip install pdf2image pytesseract"
+        )
+        return ""
+
+    logger.info("    OCR fallback: converting pages to images...")
+    try:
+        images = convert_from_path(pdf_path, last_page=max_pages, dpi=200)
+        pages_text = [pytesseract.image_to_string(img) for img in images]
+        return "\n".join(pages_text)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("    OCR failed for %s: %s", pdf_path.name, exc)
+        return ""
+
+
+def _tesseract_available() -> bool:
+    return shutil.which("tesseract") is not None
+
+
+def extract_text_from_pdf(pdf_path: Path, use_ocr: bool = False) -> dict:
     """Return extraction result dict for *pdf_path*."""
     result: dict = {
         "filename": pdf_path.name,
@@ -73,6 +106,7 @@ def extract_text_from_pdf(pdf_path: Path) -> dict:
         "full_text": "",
         "abstract": None,
         "text_for_classification": "",
+        "ocr_used": False,
         "error": None,
     }
 
@@ -85,6 +119,27 @@ def extract_text_from_pdf(pdf_path: Path) -> dict:
 
             result["pages_extracted"] = len(pages_text)
             result["full_text"] = "\n".join(pages_text)
+
+        # OCR fallback when text layer is absent or minimal
+        if use_ocr and len(result["full_text"].strip()) < MIN_TEXT_FOR_OCR:
+            logger.warning(
+                "  Text too short (%d chars) for %s — triggering OCR fallback",
+                len(result["full_text"].strip()),
+                pdf_path.name,
+            )
+            ocr_text = _ocr_fallback(pdf_path, MAX_PAGES)
+            if ocr_text.strip():
+                result["full_text"] = ocr_text
+                result["ocr_used"] = True
+            else:
+                logger.warning("  OCR produced no text for %s", pdf_path.name)
+        elif len(result["full_text"].strip()) < MIN_TEXT_FOR_OCR:
+            logger.warning(
+                "  Text too short (%d chars) for %s — "
+                "consider re-running with --ocr",
+                len(result["full_text"].strip()),
+                pdf_path.name,
+            )
 
         abstract = _extract_abstract(result["full_text"])
         result["abstract"] = abstract
@@ -129,7 +184,24 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Re-extract PDFs that already have an output file.",
     )
+    parser.add_argument(
+        "--ocr",
+        action="store_true",
+        default=_tesseract_available(),
+        help=(
+            "Enable OCR fallback for image-only PDFs using pytesseract + pdf2image "
+            "(auto-enabled when tesseract is detected on PATH; default: "
+            f"{'on' if _tesseract_available() else 'off'} on this machine)"
+        ),
+    )
+    parser.add_argument(
+        "--no-ocr",
+        action="store_true",
+        help="Disable OCR fallback even if tesseract is available.",
+    )
     args = parser.parse_args(argv)
+
+    use_ocr = args.ocr and not args.no_ocr
 
     if not args.papers_dir.exists():
         logger.error("Papers directory not found: %s", args.papers_dir)
@@ -143,6 +215,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(0)
 
     logger.info("Found %d PDF file(s) to process.", len(pdf_files))
+    if use_ocr:
+        logger.info("OCR fallback enabled (tesseract detected).")
 
     success = errors = skipped = 0
 
@@ -155,7 +229,7 @@ def main(argv: list[str] | None = None) -> None:
             continue
 
         logger.info("  extracting: %s", pdf_path.name)
-        result = extract_text_from_pdf(pdf_path)
+        result = extract_text_from_pdf(pdf_path, use_ocr=use_ocr)
 
         with open(output_path, "w", encoding="utf-8") as fh:
             json.dump(result, fh, ensure_ascii=False, indent=2)
