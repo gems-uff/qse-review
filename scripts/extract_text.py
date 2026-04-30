@@ -5,7 +5,9 @@ For each PDF found in ``papers/``, this script:
   2. Falls back to OCR (pytesseract + pdf2image) if text layer is empty/minimal
      and ``--ocr`` is requested or tesseract is auto-detected.
   3. Tries to isolate the **abstract** using common section-header patterns.
-  4. Writes a JSON file to ``data/extracted/`` that downstream scripts use.
+  4. Attempts best-effort extraction of bibliographic metadata (title, year,
+     authors) from the first page.
+  5. Writes a JSON file to ``out/extracted/`` that downstream scripts use.
 
 The JSON payload per paper:
   - ``filename``              – original PDF file name
@@ -14,6 +16,8 @@ The JSON payload per paper:
   - ``abstract``              – detected abstract section (or ``null``)
   - ``text_for_classification`` – abstract if found; else first
                                   ``MAX_WORDS_FOR_CLASSIFICATION`` words
+  - ``bibliographic``         – best-effort dict with ``title``, ``year``,
+                                ``authors`` (any field may be ``null``)
   - ``ocr_used``              – True when OCR fallback was triggered
   - ``error``                 – error message if extraction failed
 """
@@ -72,6 +76,87 @@ def _extract_abstract(text: str) -> str | None:
     return None
 
 
+def _extract_bibliographic(first_page: str) -> dict:
+    """Best-effort extraction of title, year, and authors from *first_page* text.
+
+    All fields may be ``None`` when detection fails — callers must handle that.
+    """
+    bio: dict = {"title": None, "year": None, "authors": None}
+
+    # ------------------------------------------------------------------
+    # Year — prefer explicit copyright/publication markers; fall back to
+    # any plausible 4-digit year in the range 1990-2035.
+    # ------------------------------------------------------------------
+    year_patterns = [
+        r"©\s*((?:19|20)\d{2})\b",
+        r"[Cc]opyright\s+(?:©\s*)?((?:19|20)\d{2})\b",
+        r"\b((?:19|20)\d{2})\s+IEEE\b",
+        r"\bIEEE\s+((?:19|20)\d{2})\b",
+        r"\bPublished\s+(?:in\s+)?((?:19|20)\d{2})\b",
+        r"\b((?:19|20)\d{2})\b",  # fallback: any year in range
+    ]
+    for pat in year_patterns:
+        m = re.search(pat, first_page)
+        if m:
+            bio["year"] = int(m.group(1))
+            break
+
+    # ------------------------------------------------------------------
+    # Title — heuristic: the first substantive text block on the page,
+    # before author names or abstract.  Skip lines that look like venue
+    # headers, page numbers, or are too short to be a title.
+    # ------------------------------------------------------------------
+    _VENUE_KEYWORDS = re.compile(
+        r"(?i)(proceedings|transactions|conference|workshop|journal|symposium"
+        r"|arxiv|preprint|doi:|http|@|\bvol\b|\bno\b|\bpp\b|\bpages\b)"
+    )
+    lines = first_page.splitlines()
+    title_lines: list[str] = []
+    for line in lines[:30]:
+        line = line.strip()
+        if not line:
+            if title_lines:
+                break  # blank line ends the title block
+            continue
+        if re.match(r"(?i)\babstract\b", line):
+            break
+        if len(line) < 8 or _VENUE_KEYWORDS.search(line):
+            if title_lines:
+                break  # venue header after a candidate line → stop
+            continue
+        title_lines.append(line)
+        if len(title_lines) == 3:  # titles rarely span more than 3 lines
+            break
+
+    if title_lines:
+        bio["title"] = " ".join(title_lines)
+
+    # ------------------------------------------------------------------
+    # Authors — heuristic: the first line that looks like a comma- or
+    # and-separated list of names (each word Title-Cased, 2-4 tokens).
+    # Only attempt this when we already have a title candidate to anchor.
+    # ------------------------------------------------------------------
+    if bio["title"]:
+        title_end = first_page.find(title_lines[-1]) + len(title_lines[-1])
+        candidate_block = first_page[title_end:title_end + 400]
+        _NAME_RE = re.compile(
+            r"^([A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+(?:\s+[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+){1,3}"
+            r"(?:\s*,\s*[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+(?:\s+[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+){1,3})*"
+            r"(?:\s+and\s+[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+(?:\s+[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+){1,3})?)$"
+        )
+        for line in candidate_block.splitlines():
+            line = line.strip()
+            # Strip superscript-like trailing characters (¹²³*, numbers)
+            line = re.sub(r"[\d\*†‡§¶]+$", "", line).strip()
+            if len(line) < 5 or re.match(r"(?i)\babstract\b", line):
+                break
+            if _NAME_RE.match(line):
+                bio["authors"] = line
+                break
+
+    return bio
+
+
 def _ocr_fallback(pdf_path: Path, max_pages: int) -> str:
     """Return OCR'd text for *pdf_path* using pytesseract + pdf2image."""
     try:
@@ -106,6 +191,7 @@ def extract_text_from_pdf(pdf_path: Path, use_ocr: bool = False) -> dict:
         "full_text": "",
         "abstract": None,
         "text_for_classification": "",
+        "bibliographic": {"title": None, "year": None, "authors": None},
         "ocr_used": False,
         "error": None,
     }
@@ -119,6 +205,7 @@ def extract_text_from_pdf(pdf_path: Path, use_ocr: bool = False) -> dict:
 
             result["pages_extracted"] = len(pages_text)
             result["full_text"] = "\n".join(pages_text)
+            first_page = pages_text[0] if pages_text else ""
 
         # OCR fallback when text layer is absent or minimal
         if use_ocr and len(result["full_text"].strip()) < MIN_TEXT_FOR_OCR:
@@ -140,6 +227,8 @@ def extract_text_from_pdf(pdf_path: Path, use_ocr: bool = False) -> dict:
                 len(result["full_text"].strip()),
                 pdf_path.name,
             )
+
+        result["bibliographic"] = _extract_bibliographic(first_page)
 
         abstract = _extract_abstract(result["full_text"])
         result["abstract"] = abstract

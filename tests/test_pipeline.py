@@ -9,7 +9,7 @@ import pytest
 # Allow imports from scripts/
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from extract_text import _extract_abstract, MIN_ABSTRACT_LENGTH  # noqa: E402
+from extract_text import _extract_abstract, _extract_bibliographic, MIN_ABSTRACT_LENGTH  # noqa: E402
 from classify import _validate_classification, SE_SUBJECTS, SE_SUBJECTS_SET  # noqa: E402
 from visualize import load_classifications  # noqa: E402
 
@@ -86,6 +86,58 @@ def test_extract_abstract_colon():
 def test_extract_abstract_missing():
     result = _extract_abstract(NO_ABSTRACT_TEXT)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Bibliographic extraction
+# ---------------------------------------------------------------------------
+
+BIB_IEEE = (
+    "Architectural Patterns for Hybrid Classical-Quantum Systems\n"
+    "Alice Smith, Bob Jones\n"
+    "Abstract— Quantum software engineering applies SE principles...\n"
+    "© 2023 IEEE\n"
+)
+
+BIB_COPYRIGHT_FIRST = (
+    "Journal of Quantum Software\n"
+    "Copyright © 2021\n\n"
+    "A Survey of Quantum Testing Approaches\n"
+    "Carol White and Dave Brown\n"
+    "Abstract. This paper surveys...\n"
+)
+
+BIB_NO_YEAR = (
+    "A Title Without Any Year Information\n"
+    "Eve Black\n"
+    "Abstract: Content here.\n"
+)
+
+
+def test_bibliographic_year_ieee_copyright():
+    bio = _extract_bibliographic(BIB_IEEE)
+    assert bio["year"] == 2023
+
+
+def test_bibliographic_year_copyright_line():
+    bio = _extract_bibliographic(BIB_COPYRIGHT_FIRST)
+    assert bio["year"] == 2021
+
+
+def test_bibliographic_year_missing():
+    bio = _extract_bibliographic(BIB_NO_YEAR)
+    assert bio["year"] is None
+
+
+def test_bibliographic_title_extracted():
+    bio = _extract_bibliographic(BIB_IEEE)
+    assert bio["title"] is not None
+    assert "Architectural Patterns" in bio["title"]
+
+
+def test_bibliographic_all_fields_present():
+    bio = _extract_bibliographic(BIB_IEEE)
+    assert set(bio.keys()) == {"title", "year", "authors"}
 
 
 # ---------------------------------------------------------------------------
