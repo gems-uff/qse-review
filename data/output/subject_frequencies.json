@@ -1,0 +1,34 @@
+[
+  {
+    "subject": "Software Quality",
+    "count": 3
+  },
+  {
+    "subject": "Software Testing",
+    "count": 2
+  },
+  {
+    "subject": "Software Architecture",
+    "count": 1
+  },
+  {
+    "subject": "Software Design",
+    "count": 1
+  },
+  {
+    "subject": "Software Construction",
+    "count": 1
+  },
+  {
+    "subject": "Software Engineering Process",
+    "count": 1
+  },
+  {
+    "subject": "Software Engineering Models and Methods",
+    "count": 1
+  },
+  {
+    "subject": "Software Requirements",
+    "count": 1
+  }
+]
