@@ -14,14 +14,14 @@ use Claude Code or GitHub Copilot.  An OpenAI API fallback is also available.
 ## Pipeline overview
 
 ```
-papers/QSE - Papers.xlsx          ← spreadsheet with DOI links (gitignored)
+papers/*.xlsx                     ← spreadsheet(s) with paper hyperlinks (gitignored)
     │
-    ▼ Step 0 – resolve_dois.py      (you run this; resolves DOIs via CrossRef/DBLP)
+    ▼ Step 0 – resolve_dois.py      (you run this; resolves DOIs via hyperlink/DBLP/CrossRef)
 out/dois.json                     ← canonical paper list with DOIs
 out/unresolved_papers.json        ← papers that could not be resolved (manual follow-up)
     │
-    ▼ Step 1 – extract_text.py      (you run this; deterministic, no LLM)
-out/extracted/*.json
+    ▼ Step 1 – fetch_metadata.py    (you run this; queries Semantic Scholar / CrossRef)
+out/extracted/*.json              ← title, abstract, and text_for_classification per paper
     │
     ▼ Step 2 – AI agent classifies  (agent runs this; requires an agentic CLI)
 out/classifications/*.json
@@ -55,7 +55,7 @@ pip install -r requirements.txt
 
 ### Step 1 — Copy the spreadsheet
 
-Place `QSE - Papers.xlsx` inside the `papers/` directory (gitignored):
+Place one or more `*.xlsx` files inside the `papers/` directory (gitignored):
 
 ```
 papers/
@@ -109,14 +109,14 @@ Execute the QSE classification pipeline following the instructions in CLAUDE.md.
 ```
 
 Claude Code will then:
-1. Run `python scripts/extract_text.py` to extract text from all PDFs in `papers/`.
+1. Run `python scripts/fetch_metadata.py` to fetch title and abstract for every DOI in `out/dois.json` (via Semantic Scholar, with CrossRef as fallback).
 2. Read each `out/extracted/<paper>.json` and classify it against the 15 SWEBOK knowledge areas.
 3. Write one `out/classifications/<paper>.json` per paper.
 4. Run `python scripts/visualize.py` to generate the histogram and co-occurrence charts.
 
 > **Tip:** the pipeline is idempotent — already-classified papers are skipped automatically.
-> If you add more PDFs later, just run the same prompt again and only the new papers will
-> be processed.
+> If you add more papers to the spreadsheet later, just run the same prompt again and only
+> the new entries will be processed end-to-end.
 
 ### Step 5 — Inspect the results
 
@@ -151,7 +151,8 @@ If you prefer a non-interactive run using the OpenAI API directly:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-python scripts/extract_text.py
+python scripts/resolve_dois.py --mailto your@email.com
+python scripts/fetch_metadata.py --mailto your@email.com
 python scripts/classify.py --mode api [--model gpt-4o] [--delay 0.5]
 python scripts/visualize.py
 ```
@@ -164,20 +165,25 @@ See the [API mode reference](#api-mode-reference) section below for all flags.
 
 You can also run each step individually without an agent.
 
-### Step 1 — Extract text from PDFs
+### Step 0 — Resolve DOIs
 
 ```bash
-python scripts/extract_text.py [--papers-dir papers/] [--output-dir out/extracted/] [--overwrite]
+python scripts/resolve_dois.py [--mailto your@email.com] [--input papers/] [--overwrite]
 ```
 
-Reads every `*.pdf` in `papers/`, extracts text (up to 10 pages), and attempts
-to isolate the abstract.  Pass `--ocr` (or install `tesseract` to auto-enable it)
-for scanned / image-only PDFs:
+Scans every `*.xlsx` in `papers/` (or the path given via `--input`), extracts
+each paper's hyperlink, and resolves a DOI via direct URL parsing → DBLP →
+CrossRef.  Writes `out/dois.json` and `out/unresolved_papers.json`.
+
+### Step 1 — Fetch metadata from APIs
 
 ```bash
-# macOS: brew install tesseract poppler && pip install pdf2image pytesseract
-python scripts/extract_text.py --ocr
+python scripts/fetch_metadata.py [--mailto your@email.com] [--overwrite]
 ```
+
+For every DOI in `out/dois.json`, queries Semantic Scholar (with CrossRef as
+fallback) and writes `out/extracted/<stem>.json` containing title, abstract,
+and a `text_for_classification` field.
 
 ### Step 2 — Check classification status (agent mode)
 
@@ -214,7 +220,7 @@ before counting.
 | `--overwrite` | off | Re-classify papers that already have a result |
 
 Token cost estimate: ~500–700 tokens per paper with `gpt-4o-mini`.
-500 papers ≈ $0.20–$0.35 USD (as of 2025).
+500 papers ≈ $0.20–$0.35 USD (as of 2026).
 
 ---
 
@@ -255,11 +261,6 @@ Each file in `out/classifications/<stem>.json`:
     "primary_subject": "Software Testing",
     "summary": "One sentence describing the SE contribution of the paper.",
     "confidence": "high"
-  },
-  "metadata": {
-    "classified_at": "2025-01-01T00:00:00+00:00",
-    "classifier": "agent",
-    "model": null
   }
 }
 ```
@@ -273,20 +274,16 @@ overlap; `"low"` = uncertain mapping.
 
 ```
 qse-review/
-├── papers/                  ← place QSE - Papers.xlsx here (gitignored)
+├── papers/                  ← place your *.xlsx spreadsheets here (gitignored)
 ├── out/                     ← all pipeline output (gitignored; auto-created)
 │   ├── dois.json            ← Step 0 output: canonical paper list with DOIs
 │   ├── unresolved_papers.json ← Step 0 output: papers without a DOI
-│   ├── extracted/           ← Step 1 output
+│   ├── extracted/           ← Step 1 output: metadata per paper
 │   ├── classifications/     ← Step 2 output
 │   └── analysis/            ← Step 3 output
-├── tests/
-│   ├── fixtures/
-│   │   └── papers/          ← sample PDFs used by the test suite
-│   └── test_pipeline.py
 ├── scripts/
 │   ├── resolve_dois.py      ← Step 0 script (spreadsheet → DOI list)
-│   ├── extract_text.py      ← Step 1 script
+│   ├── fetch_metadata.py    ← Step 1 script (DOI → title + abstract)
 │   ├── classify.py          ← Step 2 status / API helper
 │   └── visualize.py         ← Step 3 script
 ├── swebok_subjects.json     ← canonical SWEBOK taxonomy (15 knowledge areas)
@@ -299,7 +296,7 @@ qse-review/
 
 ## Notes
 
-* `papers/` and `out/` are gitignored.  Store the spreadsheet and any PDFs
-  externally and copy them into `papers/` before running.
+* `papers/` and `out/` are gitignored.  Store the spreadsheet(s) externally
+  and copy them into `papers/` before running.
 * In agent mode there is no extra token cost beyond your existing Claude Code
   or Copilot subscription.
