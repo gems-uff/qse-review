@@ -2,13 +2,12 @@
 
 Automated pipeline to classify scientific articles on **Quantum Software Engineering (QSE)**
 according to the SE knowledge areas defined in [SWEBOK 4th Edition](https://www.computer.org/education/bodies-of-knowledge/software-engineering).
-The pipeline produces a frequency histogram showing which SE topics are most
-covered in the QSE literature.
+The pipeline produces a frequency histogram and co-occurrence heatmap showing which SE topics
+are most covered in the QSE literature.
 
-The pipeline is designed to be driven by an **AI agent** (Claude Code, GitHub
-Copilot, etc.) that reads `CLAUDE.md` for instructions and performs the
-classification step itself — no API key required.  An OpenAI API fallback is
-also available for fully automated runs.
+**Step 2 (classification) must be performed by an AI agent** — the agent reads `CLAUDE.md`,
+reasons about each paper, and writes the classification files.  No API key is needed if you
+use Claude Code or GitHub Copilot.  An OpenAI API fallback is also available.
 
 ---
 
@@ -17,13 +16,13 @@ also available for fully automated runs.
 ```
 papers/*.pdf
     │
-    ▼ Step 1 – extract_text.py      (deterministic, no LLM)
+    ▼ Step 1 – extract_text.py      (you run this; deterministic, no LLM)
 out/extracted/*.json
     │
-    ▼ Step 2 – agent reads & classifies   ← YOU (or --mode api)
+    ▼ Step 2 – AI agent classifies  (agent runs this; requires an agentic CLI)
 out/classifications/*.json
     │
-    ▼ Step 3 – visualize.py         (deterministic, no LLM)
+    ▼ Step 3 – visualize.py         (you run this; deterministic, no LLM)
 out/analysis/
   ├── histogram.png
   ├── cooccurrence.png
@@ -32,10 +31,178 @@ out/analysis/
   └── cooccurrence.json
 ```
 
-Steps 1 and 3 are fully deterministic and require no API calls.
-Step 2 is performed by the agent following the instructions in `CLAUDE.md`,
-or optionally via the OpenAI API (`--mode api`).
-Already-processed papers are skipped automatically (idempotent).
+---
+
+## Quick start with Claude Code (recommended)
+
+This is the recommended way to run the pipeline.  Claude Code acts as the agent
+for Step 2 and can also drive Steps 1 and 3 on your behalf.
+
+### Prerequisites
+
+1. Install [Claude Code](https://claude.ai/code) and log in.
+2. Set up a Python environment and install dependencies:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### Step 1 — Copy your PDFs
+
+Place all the papers you want to classify inside the `papers/` directory:
+
+```
+papers/
+├── my_paper_1.pdf
+├── my_paper_2.pdf
+└── ...
+```
+
+### Step 2 — Open Claude Code in the project directory
+
+```bash
+cd qse-review
+claude
+```
+
+Claude Code automatically reads `CLAUDE.md`, which contains all the instructions
+the agent needs to run the pipeline.
+
+### Step 3 — Choose a model
+
+Inside Claude Code, set the model with the `/model` command.  For classification
+tasks that require careful reading and reasoning about scientific papers, **Opus**
+gives the best results:
+
+```
+/model opus     # highest quality — recommended for final runs
+/model sonnet   # faster and cheaper — good for testing with a small corpus
+```
+
+You can also set the effort level (controls how much the model "thinks" before
+answering):
+
+```
+/effort high    # recommended for classification tasks
+```
+
+### Step 4 — Start the pipeline with a single prompt
+
+Type the following prompt and press Enter:
+
+```
+Execute the QSE classification pipeline following the instructions in CLAUDE.md.
+```
+
+Claude Code will then:
+1. Run `python scripts/extract_text.py` to extract text from all PDFs in `papers/`.
+2. Read each `out/extracted/<paper>.json` and classify it against the 15 SWEBOK knowledge areas.
+3. Write one `out/classifications/<paper>.json` per paper.
+4. Run `python scripts/visualize.py` to generate the histogram and co-occurrence charts.
+
+> **Tip:** the pipeline is idempotent — already-classified papers are skipped automatically.
+> If you add more PDFs later, just run the same prompt again and only the new papers will
+> be processed.
+
+### Step 5 — Inspect the results
+
+Open the files in `out/analysis/`:
+
+| File | What it shows |
+|------|---------------|
+| `histogram.png` | How many papers address each of the 15 SWEBOK areas |
+| `cooccurrence.png` | Which pairs of areas tend to appear together |
+| `paper_subjects.csv` | Per-paper breakdown with summary and confidence |
+| `subject_frequencies.json` | Raw counts (for further analysis) |
+
+---
+
+## Quick start with other agentic tools
+
+The same `CLAUDE.md` instructions work with any agentic CLI that can read files
+and execute shell commands.
+
+### GitHub Copilot (VS Code Agent mode)
+
+1. Open the `qse-review` folder in VS Code.
+2. Open the Copilot Chat panel and switch to **Agent** mode (`@workspace`).
+3. Enter the prompt:
+   ```
+   Execute the QSE classification pipeline following the instructions in CLAUDE.md.
+   ```
+
+### OpenAI API (fully automated, no interactive agent)
+
+If you prefer a non-interactive run using the OpenAI API directly:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+python scripts/extract_text.py
+python scripts/classify.py --mode api [--model gpt-4o] [--delay 0.5]
+python scripts/visualize.py
+```
+
+See the [API mode reference](#api-mode-reference) section below for all flags.
+
+---
+
+## Running the steps manually
+
+You can also run each step individually without an agent.
+
+### Step 1 — Extract text from PDFs
+
+```bash
+python scripts/extract_text.py [--papers-dir papers/] [--output-dir out/extracted/] [--overwrite]
+```
+
+Reads every `*.pdf` in `papers/`, extracts text (up to 10 pages), and attempts
+to isolate the abstract.  Pass `--ocr` (or install `tesseract` to auto-enable it)
+for scanned / image-only PDFs:
+
+```bash
+# macOS: brew install tesseract poppler && pip install pdf2image pytesseract
+python scripts/extract_text.py --ocr
+```
+
+### Step 2 — Check classification status (agent mode)
+
+At any time, check which papers still need classifying:
+
+```bash
+python scripts/classify.py
+```
+
+This prints a status report.  The agent uses it to know what work remains
+and then writes the classification files itself.
+
+### Step 3 — Generate visualisations
+
+```bash
+python scripts/visualize.py [--classifications-dir out/classifications/] \
+    [--output-dir out/analysis/] [--title "My Title"] \
+    [--hide-empty] [--min-confidence high|medium|low]
+```
+
+`--hide-empty` omits SWEBOK areas with zero papers (by default all 15 are shown,
+so gaps are visible).  `--min-confidence` filters out low-confidence classifications
+before counting.
+
+---
+
+## API mode reference
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--mode` | `agent` | `agent` (status report) or `api` (call OpenAI) |
+| `--model` | `gpt-4o-mini` | OpenAI model (`gpt-4o` for higher accuracy) |
+| `--delay` | `0.5` | Seconds between API calls (rate-limit buffer) |
+| `--overwrite` | off | Re-classify papers that already have a result |
+
+Token cost estimate: ~500–700 tokens per paper with `gpt-4o-mini`.
+500 papers ≈ $0.20–$0.35 USD (as of 2025).
 
 ---
 
@@ -63,95 +230,9 @@ The taxonomy follows **SWEBOK 4th Edition** and is defined in `swebok_subjects.j
 
 ---
 
-## Installation
-
-```bash
-# 1. (Recommended) create a virtual environment
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Optional: OCR fallback for image-only PDFs
-#    pip install pdf2image pytesseract
-#    brew install tesseract poppler   # macOS
-```
-
----
-
-## Usage
-
-### Step 1 – Extract text from PDFs
-
-Place your PDF papers in `papers/`, then run:
-
-```bash
-python scripts/extract_text.py [--papers-dir papers/] [--output-dir out/extracted/] [--overwrite] [--ocr]
-```
-
-Reads every `*.pdf` in `papers/`, extracts text (up to 10 pages per file), and
-attempts to isolate the **abstract** section.  Outputs one JSON file per paper
-to `out/extracted/`.
-
-Pass `--ocr` (or install `tesseract` to auto-enable it) to activate OCR fallback
-for scanned / image-only PDFs.
-
-### Step 2 – Classify SE subjects
-
-#### Option A — Agent mode (default, recommended)
-
-If you are running inside an agentic CLI (Claude Code, GitHub Copilot, etc.),
-the agent reads `CLAUDE.md` and classifies each paper directly.  You can check
-what work remains at any time:
-
-```bash
-python scripts/classify.py          # prints status report of pending papers
-python scripts/classify.py --overwrite  # force re-classification of all papers
-```
-
-The agent then reads each `out/extracted/<stem>.json`, decides the
-classification, and writes `out/classifications/<stem>.json`.
-
-#### Option B — API mode
-
-To classify via the OpenAI API instead of the agent:
-
-```bash
-export OPENAI_API_KEY="sk-..."
-python scripts/classify.py --mode api [--model gpt-4o-mini] [--delay 0.5] [--overwrite]
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--mode` | `agent` | `agent` (status report) or `api` (OpenAI) |
-| `--model` | `gpt-4o-mini` | OpenAI model (use `gpt-4o` for higher accuracy) |
-| `--delay` | `0.5` | Seconds between API calls (rate-limit buffer) |
-| `--overwrite` | off | Re-classify already-classified papers |
-
-### Step 3 – Generate visualisations
-
-```bash
-python scripts/visualize.py [--classifications-dir out/classifications/] \
-    [--output-dir out/analysis/] [--title "SE Knowledge Areas in QSE Literature"] \
-    [--hide-empty] [--min-confidence high|medium|low]
-```
-
-Reads all classification files, counts subject frequencies, and produces:
-
-| Output file | Description |
-|-------------|-------------|
-| `histogram.png` | Horizontal bar chart with all 15 SWEBOK areas |
-| `cooccurrence.png` | Heatmap of subject co-occurrence |
-| `paper_subjects.csv` | Per-paper table (filename, subjects, summary, …) |
-| `subject_frequencies.json` | Subject → paper count mapping |
-| `cooccurrence.json` | Raw co-occurrence matrix |
-
----
-
 ## Classification JSON format
 
-Each file written to `out/classifications/<stem>.json` has the following structure:
+Each file in `out/classifications/<stem>.json`:
 
 ```json
 {
@@ -171,8 +252,8 @@ Each file written to `out/classifications/<stem>.json` has the following structu
 }
 ```
 
-`confidence` is `"high"` when the paper clearly focuses on the area,
-`"medium"` for partial overlap, and `"low"` when the mapping is uncertain.
+`confidence`: `"high"` = paper clearly focuses on the area; `"medium"` = partial
+overlap; `"low"` = uncertain mapping.
 
 ---
 
@@ -187,14 +268,14 @@ qse-review/
 │   └── analysis/            ← Step 3 output
 ├── tests/
 │   ├── fixtures/
-│   │   └── papers/          ← sample PDFs for testing
+│   │   └── papers/          ← sample PDFs used by the test suite
 │   └── test_pipeline.py
 ├── scripts/
 │   ├── extract_text.py      ← Step 1 script
 │   ├── classify.py          ← Step 2 status / API helper
 │   └── visualize.py         ← Step 3 script
 ├── swebok_subjects.json     ← canonical SWEBOK taxonomy (15 knowledge areas)
-├── CLAUDE.md                ← agent instructions (classification task)
+├── CLAUDE.md                ← agent instructions (read by Claude Code / Copilot)
 ├── requirements.txt
 └── README.md
 ```
@@ -203,9 +284,8 @@ qse-review/
 
 ## Notes
 
-* `papers/` and `out/` are listed in `.gitignore`; store large PDF corpora
-  externally (e.g. Google Drive, DVC, a shared network folder).
-* Token cost estimate (API mode): ~500–700 tokens/paper with `gpt-4o-mini`.
-  Processing 500 papers costs roughly $0.20–$0.35 USD (as of 2025).
-* In agent mode there is no token cost beyond your existing Copilot/Claude
-  subscription.
+* `papers/` and `out/` are gitignored.  Store large PDF corpora externally
+  (e.g. Google Drive, DVC, a shared network folder) and symlink or copy them
+  into `papers/` before running.
+* In agent mode there is no extra token cost beyond your existing Claude Code
+  or Copilot subscription.
