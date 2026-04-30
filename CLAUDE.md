@@ -15,6 +15,26 @@ steps below in order.
 
 ## Pipeline
 
+### Step 0 – Resolve DOIs from the spreadsheet
+
+```bash
+python scripts/resolve_dois.py [--mailto your@email.com]
+```
+
+Reads `papers/QSE - Papers.xlsx`, extracts all papers (year, authors, title,
+hyperlink), and resolves a DOI for every entry via:
+
+1. Direct extraction from the cell hyperlink URL (doi.org, dl.acm.org/doi/…)
+2. DBLP BibTeX endpoint (for links to dblp.org/rec/…)
+3. CrossRef title-search API (general fallback)
+
+Writes `out/dois.json` (the canonical list for the next steps) and
+`out/unresolved_papers.json` (papers without a DOI — for manual follow-up).
+
+The script is **incremental**: re-running it only resolves papers that are new
+or still lack a DOI; already-resolved papers are reused from the existing
+`out/dois.json`.  Use `--overwrite` to reprocess everything from scratch.
+
 ### Step 1 – Extract text from PDFs
 
 ```bash

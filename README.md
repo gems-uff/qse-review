@@ -14,7 +14,11 @@ use Claude Code or GitHub Copilot.  An OpenAI API fallback is also available.
 ## Pipeline overview
 
 ```
-papers/*.pdf
+papers/QSE - Papers.xlsx          ← spreadsheet with DOI links (gitignored)
+    │
+    ▼ Step 0 – resolve_dois.py      (you run this; resolves DOIs via CrossRef/DBLP)
+out/dois.json                     ← canonical paper list with DOIs
+out/unresolved_papers.json        ← papers that could not be resolved (manual follow-up)
     │
     ▼ Step 1 – extract_text.py      (you run this; deterministic, no LLM)
 out/extracted/*.json
@@ -49,16 +53,24 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Step 1 — Copy your PDFs
+### Step 1 — Copy the spreadsheet
 
-Place all the papers you want to classify inside the `papers/` directory:
+Place `QSE - Papers.xlsx` inside the `papers/` directory (gitignored):
 
 ```
 papers/
-├── my_paper_1.pdf
-├── my_paper_2.pdf
-└── ...
+└── QSE - Papers.xlsx
 ```
+
+Then resolve DOIs:
+
+```bash
+python scripts/resolve_dois.py --mailto your@email.com
+```
+
+This creates `out/dois.json` and `out/unresolved_papers.json`.  The script is
+incremental: re-running it after adding papers to the spreadsheet only processes
+the new entries.
 
 ### Step 2 — Open Claude Code in the project directory
 
@@ -261,8 +273,10 @@ overlap; `"low"` = uncertain mapping.
 
 ```
 qse-review/
-├── papers/                  ← place your PDFs here (gitignored)
+├── papers/                  ← place QSE - Papers.xlsx here (gitignored)
 ├── out/                     ← all pipeline output (gitignored; auto-created)
+│   ├── dois.json            ← Step 0 output: canonical paper list with DOIs
+│   ├── unresolved_papers.json ← Step 0 output: papers without a DOI
 │   ├── extracted/           ← Step 1 output
 │   ├── classifications/     ← Step 2 output
 │   └── analysis/            ← Step 3 output
@@ -271,6 +285,7 @@ qse-review/
 │   │   └── papers/          ← sample PDFs used by the test suite
 │   └── test_pipeline.py
 ├── scripts/
+│   ├── resolve_dois.py      ← Step 0 script (spreadsheet → DOI list)
 │   ├── extract_text.py      ← Step 1 script
 │   ├── classify.py          ← Step 2 status / API helper
 │   └── visualize.py         ← Step 3 script
@@ -284,8 +299,7 @@ qse-review/
 
 ## Notes
 
-* `papers/` and `out/` are gitignored.  Store large PDF corpora externally
-  (e.g. Google Drive, DVC, a shared network folder) and symlink or copy them
-  into `papers/` before running.
+* `papers/` and `out/` are gitignored.  Store the spreadsheet and any PDFs
+  externally and copy them into `papers/` before running.
 * In agent mode there is no extra token cost beyond your existing Claude Code
   or Copilot subscription.

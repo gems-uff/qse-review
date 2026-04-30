@@ -60,18 +60,21 @@ logger = logging.getLogger(__name__)
 DEFAULT_INPUT = Path("papers/QSE - Papers.xlsx")
 DEFAULT_OUTPUT = Path("out/dois.json")
 CROSSREF_TIMEOUT = 15  # seconds
+DBLP_TIMEOUT = 10  # seconds
 DEFAULT_CROSSREF_DELAY = 1.0  # seconds between CrossRef calls
+DBLP_DELAY = 2.0  # seconds between DBLP calls
+DBLP_MAX_RETRIES = 3  # retries on 429 / connection errors
 DEFAULT_MIN_SCORE = 30.0
 
-# DOI regex: captures 10.XXXX/... from plain text or URLs
+# DOI regex: captures 10.XXXX/... from URLs with doi.org or dl.acm.org prefix
 _DOI_RE = re.compile(
     r"(?:https?://(?:dx\.)?doi\.org/|https?://dl\.acm\.org/doi/)"
     r"(10\.\d{4,9}/[^\s,;\"'<>\[\]{}()]+)",
     re.IGNORECASE,
 )
 
-# arXiv URL → no DOI, keep URL as-is
-_ARXIV_RE = re.compile(r"arxiv\.org/abs/(\d{4}\.\d{4,5})", re.IGNORECASE)
+# DBLP record URL pattern
+_DBLP_KEY_RE = re.compile(r"dblp\.org/rec/(.+)", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +169,64 @@ def _parse_spreadsheet(path: Path) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# DBLP BibTeX fallback
+# ---------------------------------------------------------------------------
+
+def _dblp_resolve(dblp_url: str) -> str | None:
+    """Fetch the BibTeX record for a dblp.org/rec/… URL and extract the DOI."""
+    m = _DBLP_KEY_RE.search(dblp_url)
+    if not m:
+        return None
+    key = m.group(1).rstrip("/")
+    bib_url = f"https://dblp.org/rec/{key}.bib"
+    req = urllib.request.Request(
+        bib_url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; qse-review/1.0; "
+                "+https://github.com/qse-review)"
+            )
+        },
+    )
+    bib_text: str | None = None
+    for attempt in range(1, DBLP_MAX_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=DBLP_TIMEOUT) as resp:
+                bib_text = resp.read().decode("utf-8", errors="replace")
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                wait = 2 ** attempt  # 2, 4, 8 seconds
+                logger.warning(
+                    "DBLP 429 for %s — backoff %ds (attempt %d/%d)",
+                    key, wait, attempt, DBLP_MAX_RETRIES,
+                )
+                time.sleep(wait)
+            else:
+                logger.warning("DBLP BibTeX fetch failed for %s: %s", key, exc)
+                return None
+        except OSError as exc:
+            wait = 2 ** attempt
+            logger.warning(
+                "DBLP connection error for %s: %s — backoff %ds (attempt %d/%d)",
+                key, exc, wait, attempt, DBLP_MAX_RETRIES,
+            )
+            time.sleep(wait)
+    if bib_text is None:
+        logger.warning("DBLP: gave up after %d retries for %s", DBLP_MAX_RETRIES, key)
+        return None
+
+    doi_m = re.search(r'doi\s*=\s*[{"]([^}"]+)[}"]', bib_text, re.IGNORECASE)
+    if doi_m:
+        doi = doi_m.group(1).strip().rstrip(".")
+        logger.debug("  DBLP resolved DOI %s for key %s", doi, key)
+        return doi
+
+    logger.debug("  DBLP BibTeX has no DOI field for key %s", key)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # CrossRef title-search fallback
 # ---------------------------------------------------------------------------
 
@@ -213,44 +274,90 @@ def resolve_dois(
     mailto: str | None,
     skip_crossref: bool,
 ) -> list[dict]:
-    """Resolve missing DOIs in-place; return the updated list."""
-    needs_crossref = [p for p in papers if p["doi"] is None]
-    has_doi = len(papers) - len(needs_crossref)
+    """Resolve missing DOIs via DBLP then CrossRef; return the updated list."""
+    needs_resolution = [p for p in papers if p["doi"] is None]
+    has_doi = len(papers) - len(needs_resolution)
 
     logger.info(
-        "%d papers already have a DOI; %d need CrossRef resolution.",
+        "%d papers already have a DOI; %d need further resolution.",
         has_doi,
-        len(needs_crossref),
+        len(needs_resolution),
     )
 
-    if skip_crossref or not needs_crossref:
+    if not needs_resolution:
+        return papers
+
+    # --- Pass 1: DBLP BibTeX (for entries linking to dblp.org/rec/…) ------
+    dblp_candidates = [
+        p for p in needs_resolution
+        if p.get("url") and "dblp.org/rec/" in p["url"]
+    ]
+    if dblp_candidates:
+        logger.info("Pass 1 – DBLP BibTeX resolution (%d entries)…", len(dblp_candidates))
+        for i, paper in enumerate(dblp_candidates, 1):
+            logger.info("  [%d/%d] %s", i, len(dblp_candidates), paper["title"][:70])
+            doi = _dblp_resolve(paper["url"])
+            if doi:
+                paper["doi"] = doi
+                paper["doi_source"] = "dblp"
+            else:
+                logger.warning("    → DBLP: no DOI found; URL kept: %s", paper["url"])
+            if i < len(dblp_candidates):
+                time.sleep(DBLP_DELAY)
+        dblp_resolved = sum(1 for p in dblp_candidates if p["doi"])
+        logger.info("DBLP done — resolved: %d / %d", dblp_resolved, len(dblp_candidates))
+
+    # --- Pass 2: CrossRef by title (remaining entries without DOI) ---------
+    if skip_crossref:
+        return papers
+
+    still_missing = [p for p in papers if p["doi"] is None]
+    if not still_missing:
         return papers
 
     logger.info(
-        "Starting CrossRef resolution with %.1fs delay between calls…",
+        "Pass 2 – CrossRef title resolution (%d entries, %.1fs delay)…",
+        len(still_missing),
         crossref_delay,
     )
-
-    for i, paper in enumerate(needs_crossref, 1):
-        logger.info(
-            "  [%d/%d] %s", i, len(needs_crossref), paper["title"][:70]
-        )
+    for i, paper in enumerate(still_missing, 1):
+        logger.info("  [%d/%d] %s", i, len(still_missing), paper["title"][:70])
         doi = _crossref_resolve(paper["title"], min_score, mailto)
         if doi:
             paper["doi"] = doi
             paper["doi_source"] = "crossref"
         else:
-            logger.warning("    → no DOI resolved; URL kept: %s", paper.get("url"))
-
-        if i < len(needs_crossref):
+            logger.warning("    → CrossRef: no DOI resolved; URL kept: %s", paper.get("url"))
+        if i < len(still_missing):
             time.sleep(crossref_delay)
 
-    resolved = sum(1 for p in needs_crossref if p["doi"])
-    unresolved = len(needs_crossref) - resolved
+    crossref_resolved = sum(1 for p in still_missing if p["doi"])
     logger.info(
-        "CrossRef done — resolved: %d  still missing: %d", resolved, unresolved
+        "CrossRef done — resolved: %d  still missing: %d",
+        crossref_resolved,
+        len(still_missing) - crossref_resolved,
     )
     return papers
+
+
+# ---------------------------------------------------------------------------
+# Unresolved report
+# ---------------------------------------------------------------------------
+
+def _write_unresolved_report(papers: list[dict], output_path: Path) -> None:
+    """Write papers without a DOI to a separate JSON for manual follow-up."""
+    unresolved = [p for p in papers if not p["doi"]]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump(unresolved, fh, ensure_ascii=False, indent=2)
+    if unresolved:
+        logger.warning(
+            "%d paper(s) without a DOI written to %s — manual follow-up required.",
+            len(unresolved),
+            output_path,
+        )
+    else:
+        logger.info("All papers resolved — %s is empty.", output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +422,26 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _paper_key(paper: dict) -> tuple:
+    """Stable identity key for deduplication: (sheet, normalised title)."""
+    return (paper["sheet"], paper["title"].strip().lower())
+
+
+def _load_cache(path: Path) -> dict:
+    """Load existing output JSON as a dict keyed by _paper_key, or empty dict."""
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            existing: list[dict] = json.load(fh)
+        cache = {_paper_key(p): p for p in existing if isinstance(p, dict)}
+        logger.info("Loaded %d cached entries from %s.", len(cache), path)
+        return cache
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Could not read cache %s: %s — starting fresh.", path, exc)
+        return {}
+
+
 def main() -> None:
     args = _build_parser().parse_args()
 
@@ -322,13 +449,27 @@ def main() -> None:
         logger.error("Spreadsheet not found: %s", args.input)
         raise SystemExit(1)
 
-    if args.output.exists() and not args.overwrite:
-        logger.info(
-            "Output already exists: %s  (use --overwrite to regenerate)", args.output
-        )
-        raise SystemExit(0)
+    # Load the existing output as a cache (empty if --overwrite or file absent)
+    cache = {} if args.overwrite else _load_cache(args.output)
 
     papers = _parse_spreadsheet(args.input)
+
+    # Apply cache: reuse already-resolved entries; mark new/unresolved ones
+    new_count = cached_count = 0
+    for paper in papers:
+        key = _paper_key(paper)
+        if key in cache and cache[key].get("doi"):
+            # Reuse the cached resolved entry wholesale
+            paper.update(cache[key])
+            cached_count += 1
+        else:
+            new_count += 1
+
+    logger.info(
+        "Incremental mode — cached (reused): %d  new/unresolved: %d",
+        cached_count,
+        new_count,
+    )
 
     papers = resolve_dois(
         papers,
@@ -351,6 +492,9 @@ def main() -> None:
         with_doi,
         total,
     )
+
+    unresolved_path = args.output.parent / "unresolved_papers.json"
+    _write_unresolved_report(papers, unresolved_path)
 
 
 if __name__ == "__main__":
