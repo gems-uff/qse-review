@@ -23,6 +23,9 @@ out/unresolved_papers.json        ← papers that could not be resolved (manual 
     ▼ Step 1 – fetch_metadata.py    (you run this; queries Semantic Scholar / CrossRef)
 out/extracted/*.json              ← title, abstract, and text_for_classification per paper
     │
+    ▼ Step 1b – enrich_from_pdfs.py  (optional; recovers abstract/full text/DOI from local PDFs)
+out/extracted/*.json              ← enriched with PDF-derived abstract/full text and DOI hints
+    │
     ▼ Step 2 – AI agent classifies  (agent runs this; requires an agentic CLI)
 out/classifications/*.json
     │
@@ -110,9 +113,10 @@ Execute the QSE classification pipeline following the instructions in CLAUDE.md.
 
 Claude Code will then:
 1. Run `python scripts/fetch_metadata.py` to fetch title and abstract for every DOI in `out/dois.json` (via Semantic Scholar, with CrossRef as fallback).
-2. Read each `out/extracted/<paper>.json` and classify it against the 15 SWEBOK knowledge areas.
-3. Write one `out/classifications/<paper>.json` per paper.
-4. Run `python scripts/visualize.py` to generate the histogram and co-occurrence charts.
+2. Optionally run `python scripts/enrich_from_pdfs.py --update-dois` when local PDFs are available and you want to recover missing abstracts or DOIs.
+3. Read each `out/extracted/<paper>.json` and classify it against the 15 SWEBOK knowledge areas.
+4. Write one `out/classifications/<paper>.json` per paper.
+5. Run `python scripts/visualize.py` to generate the histogram and co-occurrence charts.
 
 > **Tip:** the pipeline is idempotent — already-classified papers are skipped automatically.
 > If you add more papers to the spreadsheet later, just run the same prompt again and only
@@ -184,6 +188,36 @@ python scripts/fetch_metadata.py [--mailto your@email.com] [--overwrite]
 For every DOI in `out/dois.json`, queries Semantic Scholar (with CrossRef as
 fallback) and writes `out/extracted/<stem>.json` containing title, abstract,
 and a `text_for_classification` field.
+
+### Step 1b — Enrich extracted JSONs from local PDFs
+
+```bash
+python scripts/enrich_from_pdfs.py [--update-dois] [--ocr] [--overwrite] [--crossref]
+```
+
+Scans `papers/*.pdf`, extracts text with `pdfplumber`, tries to recover the
+paper abstract, and matches each PDF against the existing `out/extracted/*.json`
+records. When it finds a better abstract or fuller text, it updates the JSON in
+place and records provenance in a `pdf_enrichment` block. With `--update-dois`,
+the script also propagates uniquely recovered DOIs back into `out/dois.json`
+and rewrites `out/unresolved_papers.json`.
+
+By default this step is **local-only**: it enriches the JSON from the PDF text
+without re-fetching bibliographic metadata from DOI services. Pass `--crossref`
+only when you explicitly want CrossRef lookups during enrichment.
+
+The enrichment step is also **incremental**: it stores per-PDF processing state
+in `out/pdf_enrichment_state.json` and skips unchanged PDFs on later runs unless
+you pass `--overwrite`. If the extracted JSON catalog changes, previously
+unmatched or ambiguous PDFs are retried automatically.
+
+If you want a standalone PDF extraction step instead of in-place enrichment:
+
+```bash
+python scripts/extract_text.py [--overwrite] [--ocr]
+```
+
+This writes one JSON per PDF using the same schema as `fetch_metadata.py`.
 
 ### Step 2 — Check classification status (agent mode)
 
