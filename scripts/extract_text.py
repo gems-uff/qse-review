@@ -5,8 +5,11 @@ For each PDF found in ``papers/``, this script:
   2. Falls back to OCR (pytesseract + pdf2image) if text layer is empty/minimal
      and ``--ocr`` is requested or tesseract is auto-detected.
   3. Tries to isolate the **abstract** using common section-header patterns.
-  4. Attempts best-effort extraction of bibliographic metadata (title, year,
-     authors) from the first page.
+  4. Attempts best-effort extraction of bibliographic metadata:
+     a. Extracts DOI from the first page (very reliable).
+     b. If a DOI is found, queries the Crossref API for precise metadata
+        (title, authors, year, venue, venue_type).
+     c. Falls back to regex heuristics when no DOI is found or the API fails.
   5. Writes a JSON file to ``out/extracted/`` that downstream scripts use.
 
 The JSON payload per paper:
@@ -16,8 +19,15 @@ The JSON payload per paper:
   - ``abstract``              – detected abstract section (or ``null``)
   - ``text_for_classification`` – abstract if found; else first
                                   ``MAX_WORDS_FOR_CLASSIFICATION`` words
-  - ``bibliographic``         – best-effort dict with ``title``, ``year``,
-                                ``authors`` (any field may be ``null``)
+  - ``bibliographic``         – metadata dict:
+      - ``doi``               – DOI string (or ``null``)
+      - ``title``             – paper title (or ``null``)
+      - ``year``              – publication year as int (or ``null``)
+      - ``authors``           – list of author name strings (or ``null``)
+      - ``venue``             – journal / conference name (or ``null``)
+      - ``venue_type``        – Crossref type string, e.g. "journal-article",
+                                "proceedings-article" (or ``null``)
+      - ``source``            – "crossref" | "heuristic"
   - ``ocr_used``              – True when OCR fallback was triggered
   - ``error``                 – error message if extraction failed
 """
@@ -25,9 +35,13 @@ The JSON payload per paper:
 import argparse
 import json
 import logging
+import os
 import re
 import shutil
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import pdfplumber
@@ -46,17 +60,28 @@ EXTRACTED_DIR = Path("out/extracted")
 MAX_PAGES = 10
 MAX_WORDS_FOR_CLASSIFICATION = 1500
 MIN_ABSTRACT_LENGTH = 100
-MIN_TEXT_FOR_OCR = 200  # characters below this threshold triggers OCR fallback
+MIN_TEXT_FOR_OCR = 200
+CROSSREF_TIMEOUT = 8  # seconds
+
+_EMPTY_BIBLIOGRAPHIC: dict = {
+    "doi": None,
+    "title": None,
+    "year": None,
+    "authors": None,
+    "venue": None,
+    "venue_type": None,
+    "source": "heuristic",
+}
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Abstract extraction
 # ---------------------------------------------------------------------------
 
 def _extract_abstract(text: str) -> str | None:
     """Return the abstract section from *text*, or ``None`` if not found."""
     patterns = [
-        # IEEE inline: "Abstract—" or "Abstract—" (em-dash / en-dash)
+        # IEEE inline: "Abstract—" or "Abstract–" (em-dash / en-dash)
         r"(?i)\babstract\s*[—–]\s*(.*?)(?=\n\s*(?:keywords|index\s+terms|i+\.\s+introduction|1[\.\s]+introduction)|\Z)",
         # Standard header followed by body text until double-newline or known section
         r"(?i)\babstract\b[\s:—–\-]*\n+(.*?)(?=\n\s*\n|\n\s*(?:keywords|index\s+terms|introduction))",
@@ -65,97 +90,220 @@ def _extract_abstract(text: str) -> str | None:
         # Springer / generic period style: "Abstract. Body text…"
         r"(?i)\babstract\.\s+(.*?)(?=\n\s*\n|\n\s*(?:keywords|introduction))",
     ]
-
     for pattern in patterns:
         match = re.search(pattern, text, re.DOTALL)
         if match:
             abstract = re.sub(r"\s+", " ", match.group(1)).strip()
             if len(abstract) > MIN_ABSTRACT_LENGTH:
                 return abstract
-
     return None
 
 
-def _extract_bibliographic(first_page: str) -> dict:
-    """Best-effort extraction of title, year, and authors from *first_page* text.
+# ---------------------------------------------------------------------------
+# DOI extraction
+# ---------------------------------------------------------------------------
 
-    All fields may be ``None`` when detection fails — callers must handle that.
+# Matches DOIs in plain text, URLs (doi.org/..., dx.doi.org/...) and
+# labelled forms (DOI:, doi:).  Trailing punctuation is stripped.
+_DOI_RE = re.compile(
+    r"(?:https?://(?:dx\.)?doi\.org/|doi:\s*|DOI:\s*)?(10\.\d{4,9}/[^\s,;\"\'<>\[\]{}()]+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_doi(text: str) -> str | None:
+    """Return the first DOI found in *text*, cleaned of trailing punctuation."""
+    match = _DOI_RE.search(text)
+    if not match:
+        return None
+    doi = match.group(1).rstrip(".")
+    return doi
+
+
+# ---------------------------------------------------------------------------
+# Crossref API
+# ---------------------------------------------------------------------------
+
+def _fetch_crossref(doi: str, mailto: str | None = None) -> dict | None:
+    """Query the Crossref REST API for *doi*.
+
+    Returns a partial bibliographic dict on success, ``None`` on any failure.
+    Pass *mailto* to join the polite pool (higher rate limits).
     """
-    bio: dict = {"title": None, "year": None, "authors": None}
+    encoded = urllib.parse.quote(doi, safe="")
+    url = f"https://api.crossref.org/works/{encoded}"
+    if mailto:
+        url += f"?mailto={urllib.parse.quote(mailto)}"
 
-    # ------------------------------------------------------------------
-    # Year — prefer explicit copyright/publication markers; fall back to
-    # any plausible 4-digit year in the range 1990-2035.
-    # ------------------------------------------------------------------
-    year_patterns = [
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": f"qse-review/1.0 (mailto:{mailto or 'unknown'})"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=CROSSREF_TIMEOUT) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        logger.debug("Crossref lookup failed for %s: %s", doi, exc)
+        return None
+
+    msg = data.get("message", {})
+
+    titles = msg.get("title") or []
+    title = titles[0] if titles else None
+
+    authors_raw = msg.get("author") or []
+    authors: list[str] | None = [
+        " ".join(filter(None, [a.get("given"), a.get("family")])).strip()
+        for a in authors_raw
+        if a.get("family")
+    ] or None
+
+    date_parts = (msg.get("published") or msg.get("published-print") or {}).get(
+        "date-parts", [[]]
+    )
+    year: int | None = date_parts[0][0] if date_parts and date_parts[0] else None
+
+    venues = msg.get("container-title") or []
+    venue = venues[0] if venues else None
+
+    venue_type = msg.get("type")  # e.g. "journal-article", "proceedings-article"
+
+    return {
+        "title": title,
+        "year": year,
+        "authors": authors,
+        "venue": venue,
+        "venue_type": venue_type,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Heuristic fallback
+# ---------------------------------------------------------------------------
+
+_VENUE_SKIP_RE = re.compile(
+    r"(?i)(proceedings|transactions|conference|workshop|journal|symposium"
+    r"|arxiv|preprint|doi:|http|@|\bvol\b|\bno\b|\bpp\b|\bpages\b)"
+)
+
+_NAME_RE = re.compile(
+    r"^([A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+(?:\s+[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+){1,3}"
+    r"(?:\s*,\s*[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+(?:\s+[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+){1,3})*"
+    r"(?:\s+and\s+[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+(?:\s+[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+){1,3})?)$"
+)
+
+_VENUE_LINE_RE = re.compile(
+    r"(?i)(proceedings\s+of\b|(?:ieee|acm|springer)\s+\w|"
+    r"(?:transactions|journal|letters)\s+on\b|"
+    r"(?:conference|workshop|symposium)\s+on\b|"
+    r"arXiv:\d{4}\.\d{4,5})"
+)
+
+
+def _heuristic_bibliographic(first_page: str) -> dict:
+    """Extract title, year, authors, venue via regex heuristics."""
+    result: dict = {
+        "doi": None,
+        "title": None,
+        "year": None,
+        "authors": None,
+        "venue": None,
+        "venue_type": None,
+        "source": "heuristic",
+    }
+
+    # Year
+    for pat in [
         r"©\s*((?:19|20)\d{2})\b",
         r"[Cc]opyright\s+(?:©\s*)?((?:19|20)\d{2})\b",
         r"\b((?:19|20)\d{2})\s+IEEE\b",
         r"\bIEEE\s+((?:19|20)\d{2})\b",
         r"\bPublished\s+(?:in\s+)?((?:19|20)\d{2})\b",
-        r"\b((?:19|20)\d{2})\b",  # fallback: any year in range
-    ]
-    for pat in year_patterns:
+        r"\b((?:19|20)\d{2})\b",
+    ]:
         m = re.search(pat, first_page)
         if m:
-            bio["year"] = int(m.group(1))
+            result["year"] = int(m.group(1))
             break
 
-    # ------------------------------------------------------------------
-    # Title — heuristic: the first substantive text block on the page,
-    # before author names or abstract.  Skip lines that look like venue
-    # headers, page numbers, or are too short to be a title.
-    # ------------------------------------------------------------------
-    _VENUE_KEYWORDS = re.compile(
-        r"(?i)(proceedings|transactions|conference|workshop|journal|symposium"
-        r"|arxiv|preprint|doi:|http|@|\bvol\b|\bno\b|\bpp\b|\bpages\b)"
-    )
+    # Title — first substantive lines before abstract / venue headers
     lines = first_page.splitlines()
     title_lines: list[str] = []
     for line in lines[:30]:
         line = line.strip()
         if not line:
             if title_lines:
-                break  # blank line ends the title block
+                break
             continue
         if re.match(r"(?i)\babstract\b", line):
             break
-        if len(line) < 8 or _VENUE_KEYWORDS.search(line):
+        if len(line) < 8 or _VENUE_SKIP_RE.search(line):
             if title_lines:
-                break  # venue header after a candidate line → stop
+                break
             continue
         title_lines.append(line)
-        if len(title_lines) == 3:  # titles rarely span more than 3 lines
+        if len(title_lines) == 3:
             break
-
     if title_lines:
-        bio["title"] = " ".join(title_lines)
+        result["title"] = " ".join(title_lines)
 
-    # ------------------------------------------------------------------
-    # Authors — heuristic: the first line that looks like a comma- or
-    # and-separated list of names (each word Title-Cased, 2-4 tokens).
-    # Only attempt this when we already have a title candidate to anchor.
-    # ------------------------------------------------------------------
-    if bio["title"]:
+    # Authors — first name-like line after the title block
+    if result["title"]:
         title_end = first_page.find(title_lines[-1]) + len(title_lines[-1])
-        candidate_block = first_page[title_end:title_end + 400]
-        _NAME_RE = re.compile(
-            r"^([A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+(?:\s+[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+){1,3}"
-            r"(?:\s*,\s*[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+(?:\s+[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+){1,3})*"
-            r"(?:\s+and\s+[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+(?:\s+[A-Z][a-záéíóúàèìòùâêîôûãõç\-\.]+){1,3})?)$"
-        )
-        for line in candidate_block.splitlines():
-            line = line.strip()
-            # Strip superscript-like trailing characters (¹²³*, numbers)
-            line = re.sub(r"[\d\*†‡§¶]+$", "", line).strip()
+        block = first_page[title_end: title_end + 400]
+        for line in block.splitlines():
+            line = re.sub(r"[\d\*†‡§¶]+$", "", line.strip()).strip()
             if len(line) < 5 or re.match(r"(?i)\babstract\b", line):
                 break
             if _NAME_RE.match(line):
-                bio["authors"] = line
+                # Split "A, B and C" into a list
+                parts = re.split(r",\s*|\s+and\s+", line)
+                result["authors"] = [p.strip() for p in parts if p.strip()]
                 break
 
+    # Venue — first line that looks like a venue name
+    for line in lines[:40]:
+        line = line.strip()
+        if _VENUE_LINE_RE.search(line) and len(line) > 10:
+            result["venue"] = line
+            if re.search(r"(?i)\barxiv\b", line):
+                result["venue_type"] = "preprint"
+            elif re.search(r"(?i)(proceedings|conference|workshop|symposium)", line):
+                result["venue_type"] = "proceedings-article"
+            elif re.search(r"(?i)(transactions|journal|letters)", line):
+                result["venue_type"] = "journal-article"
+            break
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Public bibliographic entry point
+# ---------------------------------------------------------------------------
+
+def _extract_bibliographic(first_page: str, mailto: str | None = None) -> dict:
+    """Return bibliographic metadata, preferring Crossref over heuristics."""
+    doi = _extract_doi(first_page)
+
+    if doi:
+        logger.debug("    DOI found: %s — querying Crossref", doi)
+        crossref = _fetch_crossref(doi, mailto=mailto)
+        if crossref:
+            return {
+                "doi": doi,
+                "source": "crossref",
+                **crossref,
+            }
+        logger.debug("    Crossref lookup failed for %s — falling back to heuristics", doi)
+
+    bio = _heuristic_bibliographic(first_page)
+    bio["doi"] = doi  # keep the DOI even if Crossref failed
     return bio
 
+
+# ---------------------------------------------------------------------------
+# OCR fallback
+# ---------------------------------------------------------------------------
 
 def _ocr_fallback(pdf_path: Path, max_pages: int) -> str:
     """Return OCR'd text for *pdf_path* using pytesseract + pdf2image."""
@@ -183,7 +331,15 @@ def _tesseract_available() -> bool:
     return shutil.which("tesseract") is not None
 
 
-def extract_text_from_pdf(pdf_path: Path, use_ocr: bool = False) -> dict:
+# ---------------------------------------------------------------------------
+# Main extraction
+# ---------------------------------------------------------------------------
+
+def extract_text_from_pdf(
+    pdf_path: Path,
+    use_ocr: bool = False,
+    crossref_mailto: str | None = None,
+) -> dict:
     """Return extraction result dict for *pdf_path*."""
     result: dict = {
         "filename": pdf_path.name,
@@ -191,7 +347,7 @@ def extract_text_from_pdf(pdf_path: Path, use_ocr: bool = False) -> dict:
         "full_text": "",
         "abstract": None,
         "text_for_classification": "",
-        "bibliographic": {"title": None, "year": None, "authors": None},
+        "bibliographic": dict(_EMPTY_BIBLIOGRAPHIC),
         "ocr_used": False,
         "error": None,
     }
@@ -217,18 +373,25 @@ def extract_text_from_pdf(pdf_path: Path, use_ocr: bool = False) -> dict:
             ocr_text = _ocr_fallback(pdf_path, MAX_PAGES)
             if ocr_text.strip():
                 result["full_text"] = ocr_text
+                first_page = ocr_text.split("\n\n")[0]
                 result["ocr_used"] = True
             else:
                 logger.warning("  OCR produced no text for %s", pdf_path.name)
         elif len(result["full_text"].strip()) < MIN_TEXT_FOR_OCR:
             logger.warning(
-                "  Text too short (%d chars) for %s — "
-                "consider re-running with --ocr",
+                "  Text too short (%d chars) for %s — consider re-running with --ocr",
                 len(result["full_text"].strip()),
                 pdf_path.name,
             )
 
-        result["bibliographic"] = _extract_bibliographic(first_page)
+        result["bibliographic"] = _extract_bibliographic(first_page, mailto=crossref_mailto)
+        if result["bibliographic"].get("doi"):
+            logger.info(
+                "    bibliographic: source=%s doi=%s year=%s",
+                result["bibliographic"]["source"],
+                result["bibliographic"]["doi"],
+                result["bibliographic"]["year"],
+            )
 
         abstract = _extract_abstract(result["full_text"])
         result["abstract"] = abstract
@@ -266,7 +429,7 @@ def main(argv: list[str] | None = None) -> None:
         "--output-dir",
         type=Path,
         default=EXTRACTED_DIR,
-        help="Directory to save extracted JSON files (default: data/extracted/)",
+        help="Directory to save extracted JSON files (default: out/extracted/)",
     )
     parser.add_argument(
         "--overwrite",
@@ -288,9 +451,30 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Disable OCR fallback even if tesseract is available.",
     )
+    parser.add_argument(
+        "--mailto",
+        default=os.environ.get("CROSSREF_MAILTO"),
+        metavar="EMAIL",
+        help=(
+            "E-mail address for the Crossref polite pool (higher rate limits). "
+            "Can also be set via the CROSSREF_MAILTO environment variable."
+        ),
+    )
+    parser.add_argument(
+        "--no-crossref",
+        action="store_true",
+        help="Skip Crossref API lookups and rely only on heuristic extraction.",
+    )
     args = parser.parse_args(argv)
 
     use_ocr = args.ocr and not args.no_ocr
+    mailto = None if args.no_crossref else args.mailto
+
+    if not args.no_crossref and not mailto:
+        logger.info(
+            "Tip: set --mailto or CROSSREF_MAILTO=your@email.com to join the "
+            "Crossref polite pool for faster lookups."
+        )
 
     if not args.papers_dir.exists():
         logger.error("Papers directory not found: %s", args.papers_dir)
@@ -305,7 +489,9 @@ def main(argv: list[str] | None = None) -> None:
 
     logger.info("Found %d PDF file(s) to process.", len(pdf_files))
     if use_ocr:
-        logger.info("OCR fallback enabled (tesseract detected).")
+        logger.info("OCR fallback enabled.")
+    if args.no_crossref:
+        logger.info("Crossref lookups disabled (--no-crossref).")
 
     success = errors = skipped = 0
 
@@ -318,7 +504,11 @@ def main(argv: list[str] | None = None) -> None:
             continue
 
         logger.info("  extracting: %s", pdf_path.name)
-        result = extract_text_from_pdf(pdf_path, use_ocr=use_ocr)
+        result = extract_text_from_pdf(
+            pdf_path,
+            use_ocr=use_ocr,
+            crossref_mailto=mailto,
+        )
 
         with open(output_path, "w", encoding="utf-8") as fh:
             json.dump(result, fh, ensure_ascii=False, indent=2)

@@ -9,7 +9,15 @@ import pytest
 # Allow imports from scripts/
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from extract_text import _extract_abstract, _extract_bibliographic, MIN_ABSTRACT_LENGTH  # noqa: E402
+from unittest.mock import patch
+
+from extract_text import (  # noqa: E402
+    _extract_abstract,
+    _extract_bibliographic,
+    _extract_doi,
+    _fetch_crossref,
+    MIN_ABSTRACT_LENGTH,
+)
 from classify import _validate_classification, SE_SUBJECTS, SE_SUBJECTS_SET  # noqa: E402
 from visualize import load_classifications  # noqa: E402
 
@@ -89,7 +97,74 @@ def test_extract_abstract_missing():
 
 
 # ---------------------------------------------------------------------------
-# Bibliographic extraction
+# DOI extraction
+# ---------------------------------------------------------------------------
+
+def test_extract_doi_plain():
+    assert _extract_doi("DOI: 10.1145/3597503.3597515") == "10.1145/3597503.3597515"
+
+def test_extract_doi_url():
+    assert _extract_doi("https://doi.org/10.1109/TSE.2023.001") == "10.1109/TSE.2023.001"
+
+def test_extract_doi_dx_url():
+    assert _extract_doi("http://dx.doi.org/10.1007/s10664-023-001") == "10.1007/s10664-023-001"
+
+def test_extract_doi_inline_lowercase():
+    assert _extract_doi("See doi:10.1145/3597503.0001 for details.") == "10.1145/3597503.0001"
+
+def test_extract_doi_strips_trailing_dot():
+    assert _extract_doi("Reference: 10.1145/3597503.0001.") == "10.1145/3597503.0001"
+
+def test_extract_doi_missing():
+    assert _extract_doi("No DOI in this text at all.") is None
+
+
+# ---------------------------------------------------------------------------
+# Crossref API (mocked)
+# ---------------------------------------------------------------------------
+
+_CROSSREF_RESPONSE = {
+    "status": "ok",
+    "message": {
+        "title": ["Automated Testing of Quantum Circuits"],
+        "author": [
+            {"given": "Alice", "family": "Smith"},
+            {"given": "Bob", "family": "Jones"},
+        ],
+        "published": {"date-parts": [[2023, 6, 1]]},
+        "container-title": ["IEEE Transactions on Software Engineering"],
+        "type": "journal-article",
+        "DOI": "10.1109/TSE.2023.001",
+    },
+}
+
+
+def _mock_urlopen(req, timeout=None):
+    import io
+    import urllib.response
+    body = json.dumps(_CROSSREF_RESPONSE).encode()
+    return urllib.response.addinfourl(io.BytesIO(body), {}, req.full_url, 200)
+
+
+def test_fetch_crossref_parses_response():
+    with patch("urllib.request.urlopen", side_effect=_mock_urlopen):
+        result = _fetch_crossref("10.1109/TSE.2023.001")
+    assert result["title"] == "Automated Testing of Quantum Circuits"
+    assert result["year"] == 2023
+    assert result["authors"] == ["Alice Smith", "Bob Jones"]
+    assert result["venue"] == "IEEE Transactions on Software Engineering"
+    assert result["venue_type"] == "journal-article"
+
+
+def test_fetch_crossref_returns_none_on_error():
+    import urllib.error
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("timeout")):
+        result = _fetch_crossref("10.1109/TSE.2023.001")
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Bibliographic extraction (integrated)
 # ---------------------------------------------------------------------------
 
 BIB_IEEE = (
@@ -97,6 +172,12 @@ BIB_IEEE = (
     "Alice Smith, Bob Jones\n"
     "Abstract— Quantum software engineering applies SE principles...\n"
     "© 2023 IEEE\n"
+)
+
+BIB_WITH_DOI = (
+    "A Paper With a DOI\n"
+    "DOI: 10.1109/TSE.2023.001\n"
+    "Abstract: Content here.\n"
 )
 
 BIB_COPYRIGHT_FIRST = (
@@ -114,22 +195,40 @@ BIB_NO_YEAR = (
 )
 
 
-def test_bibliographic_year_ieee_copyright():
+def test_bibliographic_uses_crossref_when_doi_found():
+    with patch("extract_text._fetch_crossref", return_value={
+        "title": "Crossref Title", "year": 2023,
+        "authors": ["Alice Smith"], "venue": "IEEE TSE", "venue_type": "journal-article",
+    }):
+        bio = _extract_bibliographic(BIB_WITH_DOI)
+    assert bio["source"] == "crossref"
+    assert bio["title"] == "Crossref Title"
+    assert bio["doi"] == "10.1109/TSE.2023.001"
+
+
+def test_bibliographic_falls_back_when_crossref_fails():
+    with patch("extract_text._fetch_crossref", return_value=None):
+        bio = _extract_bibliographic(BIB_WITH_DOI)
+    assert bio["source"] == "heuristic"
+    assert bio["doi"] == "10.1109/TSE.2023.001"  # DOI still preserved
+
+
+def test_bibliographic_heuristic_year_ieee_copyright():
     bio = _extract_bibliographic(BIB_IEEE)
     assert bio["year"] == 2023
 
 
-def test_bibliographic_year_copyright_line():
+def test_bibliographic_heuristic_year_copyright_line():
     bio = _extract_bibliographic(BIB_COPYRIGHT_FIRST)
     assert bio["year"] == 2021
 
 
-def test_bibliographic_year_missing():
+def test_bibliographic_heuristic_year_missing():
     bio = _extract_bibliographic(BIB_NO_YEAR)
     assert bio["year"] is None
 
 
-def test_bibliographic_title_extracted():
+def test_bibliographic_heuristic_title_extracted():
     bio = _extract_bibliographic(BIB_IEEE)
     assert bio["title"] is not None
     assert "Architectural Patterns" in bio["title"]
@@ -137,7 +236,7 @@ def test_bibliographic_title_extracted():
 
 def test_bibliographic_all_fields_present():
     bio = _extract_bibliographic(BIB_IEEE)
-    assert set(bio.keys()) == {"title", "year", "authors"}
+    assert set(bio.keys()) == {"doi", "title", "year", "authors", "venue", "venue_type", "source"}
 
 
 # ---------------------------------------------------------------------------
