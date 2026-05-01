@@ -125,6 +125,19 @@ Useful flags: `--hide-empty` (drop subjects with zero papers from the
 histogram), `--min-confidence {low,medium,high}` (ignore classifications below
 this confidence), and `--title TEXT` (custom histogram title).
 
+### Step 4 – Generate the PDF report
+
+```bash
+python scripts/generate_report.py
+```
+
+Reads `out/classifications/*.json`, `out/extracted/*.json`, and the figures
+already generated in `out/analysis/` to produce a styled PDF report at
+`out/report/qse_swebok_report.pdf`. The report explains the context of the
+study, summarizes what was done in the pipeline, embeds the analysis figures,
+discusses each SWEBOK area based on the studied papers, and lists the articles
+classified in each area with a brief description.
+
 ---
 
 ## Required JSON format for each classification

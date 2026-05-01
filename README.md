@@ -36,6 +36,10 @@ out/analysis/
   ├── paper_subjects.csv
   ├── subject_frequencies.json
   └── cooccurrence.json
+    │
+    ▼ Step 4 – generate_report.py   (optional; composes the final PDF report)
+out/report/
+  └── qse_swebok_report.pdf
 ```
 
 ---
@@ -117,6 +121,7 @@ Claude Code will then:
 3. Read each `out/extracted/<paper>.json` and classify it against the 15 SWEBOK knowledge areas.
 4. Write one `out/classifications/<paper>.json` per paper.
 5. Run `python scripts/visualize.py` to generate the histogram and co-occurrence charts.
+6. Optionally run `python scripts/generate_report.py` to build the final PDF report with narrative synthesis and the analysis figures.
 
 > **Tip:** the pipeline is idempotent — already-classified papers are skipped automatically.
 > If you add more papers to the spreadsheet later, just run the same prompt again and only
@@ -242,6 +247,21 @@ python scripts/visualize.py [--classifications-dir out/classifications/] \
 `--hide-empty` omits SWEBOK areas with zero papers (by default all 15 are shown,
 so gaps are visible).  `--min-confidence` filters out low-confidence classifications
 before counting.
+
+### Step 4 — Generate the PDF report
+
+```bash
+python scripts/generate_report.py [--classifications-dir out/classifications/] \
+    [--extracted-dir out/extracted/] [--analysis-dir out/analysis/] \
+    [--output out/report/qse_swebok_report.pdf]
+```
+
+This step generates a styled PDF report that:
+
+- explains the context and execution of the study;
+- embeds the histogram and co-occurrence figures from `out/analysis/`;
+- discusses each SWEBOK area based on the classified corpus;
+- lists every article assigned to each area with a brief description.
 
 ---
 

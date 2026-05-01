@@ -3,6 +3,7 @@ openai>=1.75.0
 matplotlib>=3.10.1
 pandas>=2.2.3
 tqdm>=4.67.1
+reportlab>=4.2.5
 
 # Optional: OCR fallback for image-only PDFs (also requires: brew install tesseract poppler)
 # pdf2image>=1.17.0
