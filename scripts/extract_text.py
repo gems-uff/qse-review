@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 PAPERS_DIR = Path("papers")
 EXTRACTED_DIR = Path("out/extracted")
 MAX_PAGES = 10
-MAX_WORDS_FOR_CLASSIFICATION = 1500
+MAX_CHARS_FOR_CLASSIFICATION = 1200
 MIN_ABSTRACT_LENGTH = 100
 MIN_TEXT_FOR_OCR = 200
 CROSSREF_TIMEOUT = 8
@@ -107,6 +107,14 @@ def _clean_extracted_text(text: str) -> str:
     cleaned = "\n".join(normalized_lines)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
+
+
+def _classification_excerpt(text: str, max_chars: int = MAX_CHARS_FOR_CLASSIFICATION) -> str:
+    """Return the first *max_chars* of normalized PDF text for classification."""
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return ""
+    return normalized[:max_chars].strip()
 
 
 _DOI_RE = re.compile(
@@ -365,11 +373,7 @@ def extract_text_from_pdf(
     abstract = _extract_abstract(result["full_text"])
     result["abstract"] = abstract
 
-    if abstract:
-        result["text_for_classification"] = abstract
-    else:
-        words = result["full_text"].split()
-        result["text_for_classification"] = " ".join(words[:MAX_WORDS_FOR_CLASSIFICATION])
+    result["text_for_classification"] = _classification_excerpt(result["full_text"])
 
     return result
 

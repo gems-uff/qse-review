@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
-from extract_text import MIN_ABSTRACT_LENGTH, extract_text_from_pdf
+from extract_text import extract_text_from_pdf
 
 logging.basicConfig(
     level=logging.INFO,
@@ -337,16 +337,6 @@ def _merge_record(existing: dict, pdf_result: dict, pdf_path: Path, match_by: st
         "doi_recovered": False,
     }
 
-    existing_abstract = merged.get("abstract")
-    pdf_abstract = pdf_result.get("abstract")
-    if pdf_abstract and (
-        not existing_abstract or len(existing_abstract) < MIN_ABSTRACT_LENGTH
-    ):
-        merged["abstract"] = pdf_abstract
-        merged["text_for_classification"] = pdf_abstract
-        info["updated_fields"].extend(["abstract", "text_for_classification"])
-        info["abstract_recovered"] = True
-
     pdf_text = pdf_result.get("full_text") or ""
     existing_text = merged.get("full_text") or ""
     if len(pdf_text.strip()) > len(existing_text.strip()):
@@ -354,8 +344,7 @@ def _merge_record(existing: dict, pdf_result: dict, pdf_path: Path, match_by: st
         info["updated_fields"].append("full_text")
 
     if (
-        not info["abstract_recovered"]
-        and _looks_like_title_only(merged.get("text_for_classification"))
+        _looks_like_title_only(merged.get("text_for_classification"))
         and pdf_result.get("text_for_classification")
         and not _looks_like_title_only(pdf_result["text_for_classification"])
     ):
@@ -544,8 +533,8 @@ def main(argv: list[str] | None = None) -> None:
         if (
             not args.overwrite
             and (record.get("pdf_enrichment") or {}).get("source_pdf") == pdf_path.name
-            and record.get("abstract")
-            and len(record.get("abstract") or "") >= MIN_ABSTRACT_LENGTH
+            and record.get("text_for_classification")
+            and not _looks_like_title_only(record.get("text_for_classification"))
         ):
             state[pdf_path.name] = {
                 "status": "matched",

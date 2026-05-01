@@ -23,8 +23,8 @@ out/unresolved_papers.json        ← papers that could not be resolved (manual 
     ▼ Step 1 – fetch_metadata.py    (you run this; queries Semantic Scholar / CrossRef)
 out/extracted/*.json              ← title, abstract, and text_for_classification per paper
     │
-    ▼ Step 1b – enrich_from_pdfs.py  (optional; recovers abstract/full text/DOI from local PDFs)
-out/extracted/*.json              ← enriched with PDF-derived abstract/full text and DOI hints
+    ▼ Step 1b – enrich_from_pdfs.py  (optional; recovers fuller text/DOI from local PDFs)
+out/extracted/*.json              ← enriched with PDF-derived full text, classification context, and DOI hints
     │
     ▼ Step 2 – AI agent classifies  (agent runs this; requires an agentic CLI)
 out/classifications/*.json
@@ -113,7 +113,7 @@ Execute the QSE classification pipeline following the instructions in CLAUDE.md.
 
 Claude Code will then:
 1. Run `python scripts/fetch_metadata.py` to fetch title and abstract for every DOI in `out/dois.json` (via Semantic Scholar, with CrossRef as fallback).
-2. Optionally run `python scripts/enrich_from_pdfs.py --update-dois` when local PDFs are available and you want to recover missing abstracts or DOIs.
+2. Optionally run `python scripts/enrich_from_pdfs.py --update-dois` when local PDFs are available and you want fuller classification context or DOI hints from the PDFs.
 3. Read each `out/extracted/<paper>.json` and classify it against the 15 SWEBOK knowledge areas.
 4. Write one `out/classifications/<paper>.json` per paper.
 5. Run `python scripts/visualize.py` to generate the histogram and co-occurrence charts.
@@ -195,10 +195,11 @@ and a `text_for_classification` field.
 python scripts/enrich_from_pdfs.py [--update-dois] [--ocr] [--overwrite] [--crossref]
 ```
 
-Scans `papers/*.pdf`, extracts text with `pdfplumber`, tries to recover the
-paper abstract, and matches each PDF against the existing `out/extracted/*.json`
-records. When it finds a better abstract or fuller text, it updates the JSON in
-place and records provenance in a `pdf_enrichment` block. With `--update-dois`,
+Scans `papers/*.pdf`, extracts text with `pdfplumber`, and matches each PDF
+against the existing `out/extracted/*.json` records. When the metadata API did
+not provide an abstract, this step stores the first 1200 characters of the
+cleaned PDF text in `text_for_classification`; it also updates `full_text` and
+records provenance in a `pdf_enrichment` block. With `--update-dois`,
 the script also propagates uniquely recovered DOIs back into `out/dois.json`
 and rewrites `out/unresolved_papers.json`.
 

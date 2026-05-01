@@ -60,17 +60,20 @@ python scripts/enrich_from_pdfs.py [--update-dois] [--ocr] [--crossref]
 ```
 
 When `papers/` contains the actual PDFs, run this after `fetch_metadata.py` to
-recover better abstracts, fuller text, and possible DOI hints directly from the
-PDFs. The script matches each PDF against the existing `out/extracted/*.json`
-files, updates them in place when the PDF provides stronger content, and writes
+recover fuller text, classification context, and possible DOI hints directly
+from the PDFs. The script matches each PDF against the existing
+`out/extracted/*.json` files, updates them in place, and writes
 `out/pdf_enrichment_report.json` summarizing enriched, unmatched, and ambiguous
-cases. With `--update-dois`, it also propagates uniquely recovered DOIs back to
-`out/dois.json` and regenerates `out/unresolved_papers.json`. The step is
-incremental: unchanged PDFs are skipped based on `out/pdf_enrichment_state.json`
-unless `--overwrite` is used, while previously unmatched PDFs are retried when
-the extracted catalog changes. By default this enrichment step is local-only and
-does not re-query DOI metadata services; use `--crossref` only when that extra
-bibliographic reconciliation is desired.
+cases. If the metadata APIs did not provide an abstract, the enrichment step
+uses the first 1200 characters of the cleaned PDF text as
+`text_for_classification`. With `--update-dois`, it also propagates uniquely
+recovered DOIs back to `out/dois.json` and regenerates
+`out/unresolved_papers.json`. The step is incremental: unchanged PDFs are
+skipped based on `out/pdf_enrichment_state.json` unless `--overwrite` is used,
+while previously unmatched PDFs are retried when the extracted catalog changes.
+By default this enrichment step is local-only and does not re-query DOI
+metadata services; use `--crossref` only when that extra bibliographic
+reconciliation is desired.
 
 ### Step 2 – Classify each paper (your task)
 

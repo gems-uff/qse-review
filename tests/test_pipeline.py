@@ -15,7 +15,9 @@ from enrich_from_pdfs import _doi_from_filename, _match_record, _merge_record, m
 from fetch_metadata import main as fetch_metadata_main  # noqa: E402
 from classify import _validate_classification, SE_SUBJECTS, SE_SUBJECTS_SET  # noqa: E402
 from extract_text import (  # noqa: E402
+    MAX_CHARS_FOR_CLASSIFICATION,
     MIN_ABSTRACT_LENGTH,
+    _classification_excerpt,
     _clean_extracted_text,
     _extract_abstract,
     _extract_bibliographic,
@@ -112,6 +114,13 @@ def test_extract_abstract_after_cleaning_noisy_pdf_text():
     result = _extract_abstract(cleaned)
     assert result is not None
     assert "Realistic benchmarks of reproducible bugs and fixes" in result
+
+
+def test_classification_excerpt_uses_first_characters_of_cleaned_text():
+    text = ("Quantum software engineering requires better testing support. " * 40).strip()
+    excerpt = _classification_excerpt(text)
+    assert len(excerpt) == MAX_CHARS_FOR_CLASSIFICATION
+    assert excerpt == " ".join(text.split())[:MAX_CHARS_FOR_CLASSIFICATION].strip()
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +442,7 @@ def test_doi_from_filename_supports_acm_and_springer():
     assert _doi_from_filename(Path("s10664-024-10461-9.pdf")) == "10.1007/s10664-024-10461-9"
 
 
-def test_merge_record_recovers_abstract_and_bibliographic():
+def test_merge_record_uses_pdf_prefix_for_classification_and_recovers_bibliographic():
     existing = {
         "filename": "Paper.pdf",
         "stem": "Paper",
@@ -454,11 +463,10 @@ def test_merge_record_recovers_abstract_and_bibliographic():
     }
     pdf_result = {
         "pages_extracted": 3,
-        "full_text": "Longer body text",
+        "full_text": "Longer body text that gives useful classification context.",
         "abstract": "This is a recovered abstract with enough detail to exceed the minimum length. "
         "It explains skill demands and industry expectations in quantum software testing.",
-        "text_for_classification": "This is a recovered abstract with enough detail to exceed the minimum length. "
-        "It explains skill demands and industry expectations in quantum software testing.",
+        "text_for_classification": "Longer body text that gives useful classification context.",
         "bibliographic": {
             "doi": "10.1000/example",
             "title": "Industry Expectations and Skill Demands in Quantum Software Testing",
@@ -471,8 +479,8 @@ def test_merge_record_recovers_abstract_and_bibliographic():
         "ocr_used": False,
     }
     merged, info = _merge_record(existing, pdf_result, Path("paper.pdf"), "title")
-    assert merged["abstract"] == pdf_result["abstract"]
-    assert merged["text_for_classification"] == pdf_result["abstract"]
+    assert merged["abstract"] is None
+    assert merged["text_for_classification"] == pdf_result["text_for_classification"]
     assert merged["bibliographic"]["doi"] == "10.1000/example"
     assert "bibliographic.doi" in info["updated_fields"]
 
@@ -530,13 +538,14 @@ def test_enrich_main_updates_extracted_and_doi_catalog(tmp_path, monkeypatch):
             "This paper studies industry expectations and required skills for quantum software testing, "
             "including practitioner concerns, tooling expectations, and workforce preparation."
         )
+        text_for_classification = "Prefix from cleaned PDF text with enough context for classification."
         return {
             "filename": args[0].name,
             "stem": args[0].stem,
             "pages_extracted": 2,
             "full_text": abstract + " Full paper body.",
             "abstract": abstract,
-            "text_for_classification": abstract,
+            "text_for_classification": text_for_classification,
             "bibliographic": {
                 "doi": "10.5555/qsetest.2026.1",
                 "title": "Industry Expectations and Skill Demands in Quantum Software Testing",
@@ -572,7 +581,8 @@ def test_enrich_main_updates_extracted_and_doi_catalog(tmp_path, monkeypatch):
     )
 
     enriched = json.loads(next(extracted_dir.glob("*.json")).read_text(encoding="utf-8"))
-    assert enriched["abstract"] is not None
+    assert enriched["abstract"] is None
+    assert enriched["text_for_classification"] == "Prefix from cleaned PDF text with enough context for classification."
     assert enriched["bibliographic"]["doi"] == "10.5555/qsetest.2026.1"
 
     updated_dois = json.loads(dois_path.read_text(encoding="utf-8"))
